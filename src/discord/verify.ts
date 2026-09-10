@@ -65,10 +65,37 @@ export async function verifyInteraction(
   return ok ? body : null;
 }
 
-/** Length-independent-ish comparison for shared secrets on inbound webhooks. */
+/**
+ * Compares shared secrets on inbound webhooks.
+ *
+ * Both sides are trimmed first. A secret whose value depends on surrounding
+ * whitespace isn't a secret anyone intended, and a trailing newline pasted into
+ * a GitHub secret is otherwise an invisible, permanent 401.
+ */
 export function secretsMatch(a: string, b: string): boolean {
-  if (!a || !b || a.length !== b.length) return false;
+  const left = a.trim();
+  const right = b.trim();
+  if (!left || !right || left.length !== right.length) return false;
+
   let diff = 0;
-  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  for (let i = 0; i < left.length; i++) diff |= left.charCodeAt(i) ^ right.charCodeAt(i);
   return diff === 0;
+}
+
+/**
+ * Why a secret was rejected, phrased so it can go in an HTTP response.
+ *
+ * Reveals nothing about either value except the length of what the *caller*
+ * sent - which the caller already knows - because "same length, different
+ * content" and "different length" point at different mistakes.
+ */
+export function diagnoseSecret(received: string, expected: string): string | null {
+  if (!expected) return "the Worker has no INBOUND_SECRET set";
+  if (!received) return "no X-RISK-Secret header on the request";
+  if (secretsMatch(received, expected)) return null;
+
+  const sent = received.trim().length;
+  return received.trim().length === expected.trim().length
+    ? `secret is the right length (${sent}) but doesn't match — different value`
+    : `secret is ${sent} characters, the Worker expects a different length — likely a truncated or wrong value`;
 }

@@ -17,9 +17,16 @@ jobs:
           WORKER_URL: ${{ secrets.WORKER_URL }}
           INBOUND_SECRET: ${{ secrets.INBOUND_SECRET }}
         run: |
-          set -euo pipefail
-          curl -sS -f -X POST \
+          set -uo pipefail
+
+          # --fail-with-body so a failure prints the Worker's explanation rather
+          # than a bare exit code.
+          body=$(curl -sS --fail-with-body -X POST \
             -H "X-RISK-Secret: ${INBOUND_SECRET}" \
             -H "Content-Type: application/json" \
             -d '{}' \
-            "${WORKER_URL%/}/jobs/drafts-sweep"
+            "${WORKER_URL%/}/jobs/drafts-sweep")
+          status=$?
+
+          echo "$body"
+          exit $status

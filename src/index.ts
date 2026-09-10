@@ -63,7 +63,7 @@ import { subcommandOf } from "./commands/options";
 import { isFormType } from "./config/forms";
 import { readApplications, type SheetPage, type SheetRow } from "./appsScript";
 import { isEnabled } from "./config/flags";
-import { editOriginalResponse } from "./discord/rest";
+import { alertDirectors, editOriginalResponse } from "./discord/rest";
 import { ComponentType, MODAL_TEXT_LIMIT, TextInputStyle } from "./discord/types";
 import {
   InteractionResponseType,
@@ -72,12 +72,17 @@ import {
   type Interaction,
   type MessagePayload,
 } from "./discord/types";
-import { secretsMatch, verifyInteraction } from "./discord/verify";
+import { diagnoseSecret, verifyInteraction } from "./discord/verify";
 import type { Env } from "./env";
 
-async function authorizeInbound(request: Request, env: Env): Promise<boolean> {
+/**
+ * Inbound job and webhook auth. On failure it says why in terms the caller can
+ * act on, without disclosing either secret.
+ */
+function authorizeInbound(request: Request, env: Env): Response | null {
   const header = request.headers.get("X-RISK-Secret") ?? "";
-  return secretsMatch(header, env.INBOUND_SECRET);
+  const problem = diagnoseSecret(header, env.INBOUND_SECRET ?? "");
+  return problem ? new Response(`unauthorized: ${problem}`, { status: 401 }) : null;
 }
 
 /** Reads one row, returning either the row or a message explaining why not. */
@@ -560,6 +565,43 @@ async function handleInteraction(
   });
 }
 
+/**
+ * Runs a batch of cron jobs, reporting what each one did or why it failed.
+ *
+ * Each is isolated: the backstop failing shouldn't stop the waitlist sweep. But
+ * the response is still a 500 if anything failed, so a broken morning shows up
+ * as a red workflow rather than a green one full of errors nobody reads.
+ */
+async function runJobs(
+  env: Env,
+  jobs: [string, () => Promise<unknown>][],
+): Promise<Response> {
+  const results: Record<string, unknown> = {};
+  const failures: string[] = [];
+
+  for (const [name, run] of jobs) {
+    try {
+      results[name] = await run();
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      results[name] = { error: reason };
+      failures.push(`${name}: ${reason}`);
+      console.error("job failed", name, err);
+    }
+  }
+
+  if (failures.length > 0) {
+    await alertDirectors(
+      env,
+      [`**${failures.length} daily job(s) failed.**`, ...failures.map((f) => `• ${f}`)].join(
+        "\n",
+      ),
+    );
+  }
+
+  return json({ ok: failures.length === 0, ...results }, failures.length > 0 ? 500 : 200);
+}
+
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
@@ -575,9 +617,8 @@ export default {
         return handleInteraction(request, env, ctx);
 
       case "/hooks/application-submit": {
-        if (!(await authorizeInbound(request, env))) {
-          return new Response("unauthorized", { status: 401 });
-        }
+        const denied = authorizeInbound(request, env);
+        if (denied) return denied;
         const { row } = (await request.json()) as { row?: number };
         if (typeof row !== "number" || row < 2) {
           return json({ ok: false, error: "row must be a number >= 2" }, 400);
@@ -592,9 +633,8 @@ export default {
       }
 
       case "/hooks/audition-submit": {
-        if (!(await authorizeInbound(request, env))) {
-          return new Response("unauthorized", { status: 401 });
-        }
+        const denied = authorizeInbound(request, env);
+        if (denied) return denied;
         const { row } = (await request.json()) as { row?: number };
         if (typeof row !== "number" || row < 2) {
           return json({ ok: false, error: "row must be a number >= 2" }, 400);
@@ -608,24 +648,23 @@ export default {
       }
 
       case "/jobs/drafts-sweep": {
-        if (!(await authorizeInbound(request, env))) {
-          return new Response("unauthorized", { status: 401 });
-        }
-        return json({ ok: true, ...(await sweepDrafts(env)) });
+        const denied = authorizeInbound(request, env);
+        if (denied) return denied;
+        return runJobs(env, [["drafts", () => sweepDrafts(env)]]);
       }
 
       case "/jobs/applications-daily": {
-        if (!(await authorizeInbound(request, env))) {
-          return new Response("unauthorized", { status: 401 });
-        }
+        const denied = authorizeInbound(request, env);
+        if (denied) return denied;
         // Order matters. Backstop first, so a row that was never carded gets its
         // card. Then reconcile auditions, so anyone who submitted is off
         // `awaiting`. Only then does the sweep decide what has run out of time.
-        const backstop = await runBackstop(env);
-        const auditions = await runAuditionReconcile(env);
-        const stale = await runStaleSweep(env);
-        const waitlist = await runWaitlistRevisit(env);
-        return json({ ok: true, backstop, auditions, stale, waitlist });
+        return runJobs(env, [
+          ["backstop", () => runBackstop(env)],
+          ["auditions", () => runAuditionReconcile(env)],
+          ["stale", () => runStaleSweep(env)],
+          ["waitlist", () => runWaitlistRevisit(env)],
+        ]);
       }
 
       default:

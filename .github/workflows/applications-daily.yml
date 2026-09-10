@@ -1,9 +1,11 @@
 # Daily application jobs (design doc rank 22).
 #
-#   1. Backstop - the form trigger fails silently, which looks exactly like "no
-#      applications came in". This reads the response sheet directly and posts
-#      anything that never got a card.
-#   2. Stale sweep - closes RISK-audition-process cards whose window ran out.
+#   1. Backstop        - the form trigger fails silently, which looks exactly like
+#                        "no applications came in". Reads the sheet directly.
+#   2. Audition reconcile - clears anyone who did submit off `awaiting`, before
+#                        the sweep decides who ran out of time.
+#   3. Stale sweep     - closes RISK-audition-process cards whose window ran out.
+#   4. Waitlist revisit - resurfaces anyone past their revisit date.
 #
 # Scheduled Actions run 5-30 minutes late; nothing here assumes a minute.
 name: applications-daily
@@ -22,9 +24,17 @@ jobs:
           WORKER_URL: ${{ secrets.WORKER_URL }}
           INBOUND_SECRET: ${{ secrets.INBOUND_SECRET }}
         run: |
-          set -euo pipefail
-          curl -sS -f -X POST \
+          set -uo pipefail
+
+          # --fail-with-body, not -f: a bare -f throws the response away, which
+          # turns every failure into an opaque "exit code 22" instead of the
+          # message the Worker went to the trouble of writing.
+          body=$(curl -sS --fail-with-body -X POST \
             -H "X-RISK-Secret: ${INBOUND_SECRET}" \
             -H "Content-Type: application/json" \
             -d '{}' \
-            "${WORKER_URL%/}/jobs/applications-daily"
+            "${WORKER_URL%/}/jobs/applications-daily")
+          status=$?
+
+          echo "$body"
+          exit $status
