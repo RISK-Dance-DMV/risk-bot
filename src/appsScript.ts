@@ -10,20 +10,48 @@ import type { Env } from "./env";
 
 export class AppsScriptError extends Error {}
 
+/**
+ * Apps Script reads take a couple of seconds. Anything past this is hung, not
+ * slow - usually a deployment that needs re-authorising, which answers by never
+ * answering. Failing here beats waiting out Cloudflare's 100-second 524, which
+ * says nothing about the cause.
+ */
+const APPS_SCRIPT_TIMEOUT_MS = 25_000;
+
 async function call<T>(
   env: Env,
   action: string,
   params: object = {},
 ): Promise<T> {
-  const res = await fetch(env.APPS_SCRIPT_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    // Apps Script web apps 302 to googleusercontent; fetch follows it.
-    redirect: "follow",
-    body: JSON.stringify({ secret: env.APPS_SCRIPT_SECRET, action, params }),
-  });
+  if (!env.APPS_SCRIPT_URL) {
+    throw new AppsScriptError(`${action}: APPS_SCRIPT_URL secret is not set`);
+  }
+
+  let res: Response;
+  try {
+    res = await fetch(env.APPS_SCRIPT_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      // Apps Script web apps 302 to googleusercontent; fetch follows it.
+      redirect: "follow",
+      body: JSON.stringify({ secret: env.APPS_SCRIPT_SECRET, action, params }),
+      signal: AbortSignal.timeout(APPS_SCRIPT_TIMEOUT_MS),
+    });
+  } catch (err) {
+    const timedOut = err instanceof Error && err.name === "TimeoutError";
+    throw new AppsScriptError(
+      timedOut
+        ? `${action}: Apps Script didn't answer within ${APPS_SCRIPT_TIMEOUT_MS / 1000}s. Usually the web app needs re-authorising after a code change — open the editor, run any function once, accept the prompts, then redeploy the same deployment.`
+        : `${action}: couldn't reach Apps Script: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
 
   const text = await res.text();
+  if (res.status === 524 || res.status === 504) {
+    throw new AppsScriptError(
+      `${action}: Apps Script timed out (HTTP ${res.status}). Usually the web app needs re-authorising after a code change, or it's pointed at a deployment that no longer works.`,
+    );
+  }
   if (!res.ok) throw new AppsScriptError(`${action}: HTTP ${res.status}: ${text.slice(0, 500)}`);
 
   let parsed: { ok?: boolean; error?: string; data?: T };

@@ -24,7 +24,9 @@ jobs:
           WORKER_URL: ${{ secrets.WORKER_URL }}
           INBOUND_SECRET: ${{ secrets.INBOUND_SECRET }}
         run: |
-          set -uo pipefail
+          # GitHub starts this shell as `bash -e`, so a failing curl would exit
+          # before the echo. Clearing -e is what makes the error message reachable.
+          set +e -uo pipefail
 
           # --fail-with-body, not -f: a bare -f throws the response away, which
           # turns every failure into an opaque "exit code 22" instead of the

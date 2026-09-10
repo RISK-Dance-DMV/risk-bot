@@ -11,7 +11,8 @@ export type SettingKey =
   | "decision_min_votes"
   | "draft_reping_hours"
   | "waitlist_revisit_days"
-  | "invite_days";
+  | "invite_days"
+  | "backstop_max_per_run";
 
 const DEFAULTS: Record<SettingKey, number> = {
   /** Days a "RISK audition process" card waits for a submission before closing. */
@@ -27,6 +28,12 @@ const DEFAULTS: Record<SettingKey, number> = {
    * expiring IS the deadline, rather than a second thing anyone has to enforce.
    */
   invite_days: 7,
+  /**
+   * Cards the backstop will post in one run. Each costs a Discord post plus one
+   * fetch per video link, against a Worker's fixed subrequest budget — past it
+   * every remaining row fails at once. Leftovers wait for the next run.
+   */
+  backstop_max_per_run: 5,
 };
 
 export async function getNumber(env: Env, key: SettingKey): Promise<number> {
