@@ -361,19 +361,16 @@ function placementRow(
   ];
 }
 
-function decisionRow(row: number, decision: Decision): Button[] {
-  // A split locks the ballot (design doc s23). The way back out is a recorded
-  // outcome, not an undo - see finalRow.
-  const locked = hasSplit(decision);
-
+/**
+ * There is no [Need to discuss] button.
+ *
+ * A discrepancy already locks the ballot, pings every director and offers the
+ * two resolution buttons, so a hold would have signalled something the card had
+ * already said. The ballot type survives in the model for records that carry
+ * one; nothing sets it any more.
+ */
+function decisionRow(row: number): Button[] {
   return [
-    {
-      type: ComponentType.BUTTON,
-      style: ButtonStyle.SECONDARY,
-      label: "Need to discuss",
-      custom_id: customId("hold", row),
-      disabled: locked,
-    },
     {
       type: ComponentType.BUTTON,
       style: ButtonStyle.PRIMARY,
@@ -548,7 +545,7 @@ export function buildDancerCard(row: ApplicationRow, opts: CardOptions): Message
   } else {
     if (decision && decidable) {
       rows.push(voteRow(row.row, cell(row.values, subunitsColumn), hasSplit(decision)));
-      rows.push(decisionRow(row.row, decision));
+      rows.push(decisionRow(row.row));
       const final = finalRow(row.row, decision, opts.outcome);
       if (final.length > 0) rows.push(final);
     }

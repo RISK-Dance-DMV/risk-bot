@@ -330,7 +330,7 @@ describe("when decision buttons appear", () => {
 
   it("shows them as soon as a RISK-process audition is submitted", () => {
     const ids = buttonIds(withDecision("submitted"));
-    expect(ids).toEqual(expect.arrayContaining(["app|vote|12", "app|hold|12"]));
+    expect(ids).toEqual(expect.arrayContaining(["app|vote|12", "app|feedback|12"]));
   });
 
   it("shows them immediately for an existing-links applicant", () => {

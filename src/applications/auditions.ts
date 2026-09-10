@@ -8,6 +8,7 @@
 import { getForms, readApplications, readAuditions, type SheetPage } from "../appsScript";
 import { PINNED } from "../config/columns";
 import { isEnabled } from "../config/flags";
+import { getNumber } from "../config/settings";
 import { alertDirectors } from "../discord/rest";
 import type { Env } from "../env";
 import { cell, parseRow } from "./fields";
@@ -194,15 +195,27 @@ export async function handleAuditionSubmit(env: Env, row: number): Promise<void>
   await run(env, emailColumn, [target]);
 }
 
+/** Highest audition row the reconcile considers already handled. */
+export const AUDITION_FLOOR_KEY = "aud:reconcile:floor";
+
 export interface ReconcileResult {
   skipped?: "flag_off" | "not_registered";
   scanned: number;
   matched: number;
+  /** Set on the first run, when existing rows are adopted rather than processed. */
+  adoptedAsHistory?: number;
+  /** Rows above the floor still waiting, because the per-run cap was reached. */
+  remaining?: number;
 }
 
 /**
  * Daily backstop for the audition trigger. Without this, a failed trigger looks
  * exactly like "nobody auditioned" and the sweep closes them at 14 days.
+ *
+ * Floored and capped for the same reasons as the application backstop: on first
+ * sight of a form it adopts what's already there as history rather than
+ * replaying a season of auditions, and each run handles a few rows at most,
+ * because matching one costs a sheet read, a card edit and a ping.
  */
 export async function runAuditionReconcile(env: Env): Promise<ReconcileResult> {
   if (!(await isEnabled(env, "applications"))) {
@@ -213,16 +226,45 @@ export async function runAuditionReconcile(env: Env): Promise<ReconcileResult> {
   if (!emailColumn) return { skipped: "not_registered", scanned: 0, matched: 0 };
 
   const page = await readAuditions(env, { fromRow: 2, limit: MAX_ROWS });
+  const highestRow = page.rows.reduce((max, r) => Math.max(max, r.row), 1);
+  const storedFloor = await env.KV.get(AUDITION_FLOOR_KEY);
 
-  const unseen: { row: number; values: string[] }[] = [];
-  for (const row of page.rows) {
-    if (!(await env.KV.get(seenKey(row.row)))) unseen.push(row);
+  // First sight of this form: whatever is already in it happened before the bot
+  // existed. Adopt it rather than flipping cards for a season that's over.
+  if (storedFloor === null) {
+    await env.KV.put(AUDITION_FLOOR_KEY, String(highestRow));
+    return {
+      scanned: page.rows.length,
+      matched: 0,
+      adoptedAsHistory: page.rows.length,
+    };
   }
 
-  const results = await run(env, emailColumn, unseen);
+  const floor = Number.parseInt(storedFloor, 10);
+  const candidates: { row: number; values: string[] }[] = [];
+  for (const row of page.rows) {
+    if (row.row <= (Number.isFinite(floor) ? floor : 0)) continue;
+    if (await env.KV.get(seenKey(row.row))) continue;
+    candidates.push(row);
+  }
+  candidates.sort((a, b) => a.row - b.row);
+
+  const cap = Math.max(1, await getNumber(env, "audition_max_per_run"));
+  const batch = candidates.slice(0, cap);
+
+  const results = await run(env, emailColumn, batch);
   const matched = results.filter(
     (r) => r.outcome === "matched" || r.outcome === "matched_late",
   ).length;
 
-  return { scanned: page.rows.length, matched };
+  // Only advance past rows that actually got a result, so a failure is retried.
+  const highestDone = results.reduce((max, r) => Math.max(max, r.row), floor);
+  if (highestDone > floor) await env.KV.put(AUDITION_FLOOR_KEY, String(highestDone));
+
+  const remaining = candidates.length - batch.length;
+  return {
+    scanned: page.rows.length,
+    matched,
+    ...(remaining > 0 ? { remaining } : {}),
+  };
 }

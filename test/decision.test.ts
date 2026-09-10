@@ -220,24 +220,37 @@ describe("feedback", () => {
 });
 
 describe("renderDecision", () => {
-  it("shows per-subunit counts and how each director voted", () => {
+  it("seals the ballots until every director has voted", () => {
     const text = renderDecision(
       decision({ d1: ["Hearts"], d2: ["Hearts", "Clubs"] }),
       DIRECTORS,
       2,
     );
+    expect(text).toContain("Votes: 2 of 3 in — sealed");
+    expect(text).not.toContain("Hearts");
+    expect(text).not.toContain("<@d1>");
+  });
+
+  it("reveals counts and every ballot once the last vote lands", () => {
+    const text = renderDecision(
+      decision({ d1: ["Hearts"], d2: ["Hearts", "Clubs"], d3: ["Hearts"] }),
+      DIRECTORS,
+      2,
+    );
     expect(text).toContain("Clubs 1");
-    expect(text).toContain("Hearts 2");
+    expect(text).toContain("Hearts 3");
     expect(text).toContain("<@d1> — Hearts");
   });
 
-  it("names who hasn't voted yet", () => {
+  it("counts who is outstanding without naming what anyone picked", () => {
     const text = renderDecision(decision({ d1: ["Hearts"] }), DIRECTORS, 2);
-    expect(text).toContain("<@d2> — *yet to vote*");
+    expect(text).toContain("Votes: 1 of 3 in");
+    expect(text).not.toContain("Hearts");
   });
 
-  it("shows a vote for nobody as none", () => {
-    expect(renderDecision(decision({ d1: [] }), DIRECTORS, 2)).toContain("<@d1> — none");
+  it("shows a vote for nobody as none, once revealed", () => {
+    const all = decision({ d1: [], d2: [], d3: [] });
+    expect(renderDecision(all, DIRECTORS, 2)).toContain("<@d1> — none");
   });
 
   it("states the agreed placement once they all match", () => {

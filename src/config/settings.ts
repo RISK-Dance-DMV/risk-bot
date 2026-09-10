@@ -12,7 +12,8 @@ export type SettingKey =
   | "draft_reping_hours"
   | "waitlist_revisit_days"
   | "invite_days"
-  | "backstop_max_per_run";
+  | "backstop_max_per_run"
+  | "audition_max_per_run";
 
 const DEFAULTS: Record<SettingKey, number> = {
   /** Days a "RISK audition process" card waits for a submission before closing. */
@@ -34,6 +35,8 @@ const DEFAULTS: Record<SettingKey, number> = {
    * every remaining row fails at once. Leftovers wait for the next run.
    */
   backstop_max_per_run: 5,
+  /** Same reasoning, for matching audition submissions to their cards. */
+  audition_max_per_run: 5,
 };
 
 export async function getNumber(env: Env, key: SettingKey): Promise<number> {

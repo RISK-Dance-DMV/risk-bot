@@ -64,12 +64,12 @@ export async function handleFormRegister(
   }).catch((err) => err as Error);
   if (committed instanceof Error) return refuse([committed.message]);
 
+  // Both jobs adopt whatever is already in a sheet as history on first sight, so
+  // registering a mid-season form doesn't replay it.
   const backlog =
     inspection.responseCount === 0
       ? "No responses on it yet."
-      : type === "application"
-        ? `${inspection.responseCount} existing response(s) — tomorrow's backstop will card any that were never posted.`
-        : `${inspection.responseCount} existing response(s) — tomorrow's reconcile will match them to applications.`;
+      : `${inspection.responseCount} existing response(s) — treated as history and left alone. Only submissions from now on are picked up.`;
 
   return {
     content: [

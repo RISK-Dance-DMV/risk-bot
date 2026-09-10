@@ -198,6 +198,17 @@ const STATUS_LABEL: Record<DecisionStatus, string> = {
   rejected: "🚫 **Agreed: no placement**",
 };
 
+/** True once every director has put something in — a vote or a hold. */
+export function allBalloted(
+  decision: Decision,
+  directorIds: readonly string[],
+): boolean {
+  return (
+    directorIds.length > 0 &&
+    directorIds.every((id) => decision.ballots[id] !== undefined)
+  );
+}
+
 /** One line per director, so a split shows exactly where it disagrees. */
 function ballotLines(decision: Decision, directorIds: readonly string[]): string[] {
   const lines: string[] = [];
@@ -241,13 +252,22 @@ export function renderDecision(
     );
   }
 
-  if (t.cast + t.hold > 0) {
+  // Ballots stay sealed until everyone has voted, for the same reason feedback
+  // does: a director who can see the others' picks is choosing against them
+  // rather than on the audition. With exact-match agreement that matters more
+  // than usual — anchoring produces unanimity that was really just conformity.
+  if (allBalloted(decision, directorIds)) {
     const counts = Object.entries(t.bySubunit)
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([unit, n]) => `${unit} ${n}`);
     if (t.no > 0) counts.push(`none ${t.no}`);
     if (counts.length > 0) lines.push(counts.join(" · "));
     lines.push(...ballotLines(decision, directorIds));
+  } else if (directorIds.length > 0) {
+    const voted = directorIds.filter((id) => decision.ballots[id] !== undefined).length;
+    lines.push(
+      `Votes: ${voted} of ${directorIds.length} in — sealed until everyone has voted.`,
+    );
   }
 
   if (directorIds.length === 0) {
