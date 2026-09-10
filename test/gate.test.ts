@@ -6,6 +6,7 @@ import type { Env } from "../src/env";
 const DIRECTORS_CHANNEL_ID = "555";
 
 const env = {
+  GUILD_COMMUNITY_ID: "community",
   GUILD_DANCE_ID: "dance",
   ROLE_DIRECTOR_ID: "director-role",
   CH_DIRECTORS_CONFIRMATION: "directors-bot-confirmation",
@@ -18,7 +19,7 @@ const interaction = (over: Partial<Interaction> = {}): Interaction =>
     type: 2,
     token: "t",
     application_id: "a",
-    guild_id: "dance",
+    guild_id: "community",
     channel_id: DIRECTORS_CHANNEL_ID,
     member: { roles: ["director-role"] },
     ...over,
@@ -43,13 +44,13 @@ describe("declineReason", () => {
     expect(reason).toBe("That command is directors only.");
   });
 
-  it("declines outside the dance guild", async () => {
+  it("declines outside the community guild", async () => {
     const reason = await declineReason(
       env,
-      interaction({ guild_id: "community" }),
+      interaction({ guild_id: "dance" }),
       env.CH_DIRECTORS_CONFIRMATION,
     );
-    expect(reason).toContain("dance server");
+    expect(reason).toContain("community server");
   });
 
   it("declines outside the allowed channel", async () => {

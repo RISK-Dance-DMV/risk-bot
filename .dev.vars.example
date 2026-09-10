@@ -1,9 +1,12 @@
-DISCORD_PUBLIC_KEY=
+# Local-only, gitignored. ONLY real secrets belong here — the non-secret Discord
+# IDs (application id, guild ids, role id) live in wrangler.toml under [vars].
+#
+# `npm run register` needs exactly one value from this file: DISCORD_BOT_TOKEN.
+# The rest are for `wrangler dev`; in production the Worker reads its own copies
+# set with `npx wrangler secret put`.
+
 DISCORD_BOT_TOKEN=
-DISCORD_APPLICATION_ID=
-ROLE_DIRECTOR_ID=
-GUILD_COMMUNITY_ID=
-GUILD_DANCE_ID=
+DISCORD_PUBLIC_KEY=
 APPS_SCRIPT_URL=
 APPS_SCRIPT_SECRET=
 INBOUND_SECRET=

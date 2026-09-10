@@ -9,7 +9,7 @@ import type { Env } from "../env";
  * An explicit ID list is also a stricter check than a role, not a looser one -
  * it is never a permission bit standing in for "director".
  *
- *   wrangler kv key put --binding=KV config:director_ids "111,222,333" --remote
+ *   wrangler kv:key put --binding=KV config:director_ids "111,222,333" --preview false
  */
 export async function getDirectorIds(env: Env): Promise<string[]> {
   const raw = await env.KV.get("config:director_ids");

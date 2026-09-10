@@ -5,6 +5,7 @@
  * terminal step is rank 27 (email), which is not built.
  */
 import { getDirectorIds } from "../config/directors";
+import { getNumber } from "../config/settings";
 import { modalValue } from "../discord/respond";
 import { postMessage } from "../discord/rest";
 import {
@@ -16,7 +17,15 @@ import {
 } from "../discord/types";
 import type { Env } from "../env";
 import { isDecidable } from "./card";
-import { emptyDecision, hasSplit, type Ballot, type Decision } from "./decision";
+import {
+  agreedPlacement,
+  decisionStatus,
+  emptyDecision,
+  hasSplit,
+  isSettled,
+  type Ballot,
+  type Decision,
+} from "./decision";
 import { parseRow } from "./fields";
 import { getRecord, putRecord, refreshCard, type CardRecord } from "./intake";
 import { mention } from "./text";
@@ -44,17 +53,24 @@ async function commit(env: Env, record: CardRecord, decision: Decision): Promise
  * A separate message rather than an edit: editing the card would not notify
  * anyone, and the point of the announcement is that it reaches people.
  */
-async function announceSplit(env: Env, record: CardRecord): Promise<void> {
-  const directorIds = await getDirectorIds(env);
+async function announce(
+  env: Env,
+  record: CardRecord,
+  directorIds: readonly string[],
+  body: string,
+): Promise<void> {
   if (directorIds.length === 0) return;
 
-  const name = record.values ? parseRow(record.row, record.values).name : `row ${record.row}`;
   const link = `https://discord.com/channels/${env.GUILD_COMMUNITY_ID}/${record.channelId}/${record.messageId}`;
-
   await postMessage(env, record.channelId, {
-    content: `${directorIds.map(mention).join(" ")} — split vote on **${name || `row ${record.row}`}**. Worth a conversation, then record it on the card.\n${link}`,
-    allowed_mentions: { parse: [], users: directorIds },
+    content: `${directorIds.map(mention).join(" ")} — ${body}\n${link}`,
+    allowed_mentions: { parse: [], users: [...directorIds] },
   });
+}
+
+function applicantName(record: CardRecord): string {
+  const name = record.values ? parseRow(record.row, record.values).name : "";
+  return name || `row ${record.row}`;
 }
 
 export async function applyBallot(
@@ -71,15 +87,34 @@ export async function applyBallot(
     ballots: { ...loaded.decision.ballots, [userId]: ballot },
   };
 
-  const shouldAnnounce =
-    hasSplit(decision) && !decision.final && !decision.pingedDiscussion;
-  if (shouldAnnounce) decision.pingedDiscussion = true;
+  const [directorIds, minVotes] = await Promise.all([
+    getDirectorIds(env),
+    getNumber(env, "decision_min_votes"),
+  ]);
+  const status = decisionStatus(decision, directorIds, minVotes);
+
+  // Both announcements fire at most once, and only for what the vote itself
+  // reached - a decision recorded by hand needs no telling, the person who
+  // recorded it was there.
+  let body: string | null = null;
+
+  if (hasSplit(decision) && !decision.final && !decision.pingedDiscussion) {
+    decision.pingedDiscussion = true;
+    body = `**${applicantName(loaded.record)}** — you didn't all vote the same placement. Worth a conversation, then record it on the card.`;
+  } else if (!decision.final && !decision.pingedSettled && isSettled(status)) {
+    decision.pingedSettled = true;
+    const agreed = agreedPlacement(decision, directorIds) ?? [];
+    body =
+      status === "accepted"
+        ? `**${applicantName(loaded.record)}** — everyone voted **${agreed.join(", ")}**. Ready to interview or make an offer.`
+        : `**${applicantName(loaded.record)}** — everyone voted no. Ready to send a rejection.`;
+  }
 
   await commit(env, loaded.record, decision);
-  if (shouldAnnounce) await announceSplit(env, loaded.record);
+  if (body) await announce(env, loaded.record, directorIds, body);
 }
 
-/** [Final Yes] / [Final No] — the recorded outcome of the discussion. */
+/** [Move onto Interview] — settles the split and unlocks the interview. */
 export async function recordFinal(
   env: Env,
   row: number,
@@ -93,6 +128,34 @@ export async function recordFinal(
     ...loaded.decision,
     final: { outcome, by: userId, at: new Date().toISOString() },
   });
+}
+
+/**
+ * [Reject from RISK] on a split card — settles the discussion *and* opens the
+ * rejection straight away, because deciding not to take someone and telling them
+ * are the same act.
+ *
+ * Writes once and skips redrawing the card: the modal has to be the immediate
+ * response, and the card gets refreshed when the rejection is completed anyway.
+ */
+export async function rejectAfterDiscussion(
+  env: Env,
+  row: number,
+  userId: string,
+): Promise<CardRecord | null> {
+  const loaded = await loadDecidable(env, row);
+  if (!loaded) return null;
+
+  const updated: CardRecord = {
+    ...loaded.record,
+    decision: {
+      ...loaded.decision,
+      final: { outcome: "no", by: userId, at: new Date().toISOString() },
+    },
+    pending: { outcome: "rejected", startedBy: userId },
+  };
+  await putRecord(env, updated);
+  return updated;
 }
 
 export async function saveFeedback(
@@ -131,8 +194,9 @@ export function feedbackModalResponse(row: number, existing: string): unknown {
               type: ComponentType.TEXT_INPUT,
               custom_id: FEEDBACK_INPUT_ID,
               style: TextInputStyle.PARAGRAPH,
-              label: "Your feedback",
-              placeholder: "Shown to the others once everyone has written theirs.",
+              label: "Feedback for the applicant",
+              placeholder:
+                "The applicant reads this. Hidden from the other directors until all of you have written.",
               max_length: MODAL_TEXT_LIMIT,
               required: false,
               value: existing.slice(0, MODAL_TEXT_LIMIT),

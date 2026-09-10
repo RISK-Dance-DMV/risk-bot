@@ -19,7 +19,9 @@ import {
   type Decision,
   type DecisionStatus,
   type OutcomeRecord,
+  type PendingOutcome,
 } from "./decision";
+import { placementOptions } from "../config/subunits";
 import { cell } from "./fields";
 import type { ApplicationRow } from "./fields";
 import { renderInterviewLine, type InterviewRecord } from "./interviewSlot";
@@ -62,8 +64,7 @@ export function isDecidable(state: CardState): boolean {
 export type CardAction =
   | "open"
   | "reopen"
-  | "yes"
-  | "no"
+  | "vote"
   | "hold"
   | "final-yes"
   | "final-no"
@@ -76,14 +77,15 @@ export type CardAction =
   | "outcome-welcome"
   | "outcome-reject"
   | "outcome-waitlist"
+  | "placement"
+  | "outcome-save"
   | "reply"
   | "reply-save";
 
 const ACTIONS: CardAction[] = [
   "open",
   "reopen",
-  "yes",
-  "no",
+  "vote",
   "hold",
   "final-yes",
   "final-no",
@@ -96,6 +98,8 @@ const ACTIONS: CardAction[] = [
   "outcome-welcome",
   "outcome-reject",
   "outcome-waitlist",
+  "placement",
+  "outcome-save",
   "reply",
   "reply-save",
 ];
@@ -120,8 +124,7 @@ export function parseCustomId(
 /** Actions gated on the director roster. */
 export function isDirectorAction(action: CardAction): boolean {
   return [
-    "yes",
-    "no",
+    "vote",
     "hold",
     "final-yes",
     "final-no",
@@ -134,6 +137,8 @@ export function isDirectorAction(action: CardAction): boolean {
     "outcome-welcome",
     "outcome-reject",
     "outcome-waitlist",
+    "placement",
+    "outcome-save",
     "reply",
     "reply-save",
   ].includes(action);
@@ -229,6 +234,7 @@ export interface CardOptions {
   minVotes?: number;
   interview?: InterviewRecord;
   outcome?: OutcomeRecord;
+  pending?: PendingOutcome;
 }
 
 /**
@@ -277,26 +283,90 @@ interface Button {
   disabled?: boolean;
 }
 
+interface Select {
+  type: number;
+  custom_id: string;
+  placeholder: string;
+  min_values: number;
+  max_values: number;
+  disabled?: boolean;
+  options: { label: string; value: string; default?: boolean }[];
+}
+
+/** Chosen instead of any subunit — an explicit no rather than an empty pick. */
+export const VOTE_NONE = "__none__";
+
+/**
+ * The ballot: which subunits this director would take them into.
+ *
+ * A select rather than Yes/No, because the real question was never whether to
+ * accept someone — it's where they'd go. Options come from what they auditioned
+ * for, plus an explicit "none".
+ */
+function voteRow(row: number, appliedFor: string, locked: boolean): Select[] {
+  const { options } = placementOptions(appliedFor);
+  return [
+    {
+      type: ComponentType.STRING_SELECT,
+      custom_id: customId("vote", row),
+      placeholder: locked
+        ? "Voting locked — settle the split below"
+        : "Your vote: which subunits?",
+      min_values: 1,
+      max_values: options.length + 1,
+      disabled: locked,
+      options: [
+        ...options.map((unit) => ({ label: unit, value: unit })),
+        { label: "None — don't accept", value: VOTE_NONE },
+      ],
+    },
+  ];
+}
+
+type RowComponent = Button | Select;
+
+/**
+ * The placement select, shown while an outcome is part-way through being made.
+ *
+ * Options come from what they actually auditioned for (column I), so nobody can
+ * be placed in a subunit they never tried out for. A rejection needs no
+ * placement, so it skips straight to the feedback modal.
+ */
+function placementRow(
+  row: number,
+  appliedFor: string,
+  pending?: PendingOutcome,
+): Select[] {
+  if (!pending || pending.outcome === "rejected") return [];
+
+  const { options } = placementOptions(appliedFor);
+  const verb = pending.outcome === "welcomed" ? "Placing in" : "Offering";
+  // Seeded from what the vote agreed on, so confirming an unchanged placement is
+  // one tap. After a split there's nothing agreed, and nothing is preselected.
+  const seeded = pending.subunits ?? [];
+
+  return [
+    {
+      type: ComponentType.STRING_SELECT,
+      custom_id: customId("placement", row),
+      placeholder: `${verb}… pick one or more`,
+      min_values: 1,
+      max_values: options.length,
+      options: options.map((unit) => ({
+        label: unit,
+        value: unit,
+        ...(seeded.includes(unit) ? { default: true } : {}),
+      })),
+    },
+  ];
+}
+
 function decisionRow(row: number, decision: Decision): Button[] {
-  // Split votes lock the decision buttons (design doc s23). The way back out is
-  // a recorded outcome, not an undo - see finalRow.
+  // A split locks the ballot (design doc s23). The way back out is a recorded
+  // outcome, not an undo - see finalRow.
   const locked = hasSplit(decision);
 
-  const buttons: Button[] = [
-    {
-      type: ComponentType.BUTTON,
-      style: ButtonStyle.SUCCESS,
-      label: "Yes",
-      custom_id: customId("yes", row),
-      disabled: locked,
-    },
-    {
-      type: ComponentType.BUTTON,
-      style: ButtonStyle.DANGER,
-      label: "No",
-      custom_id: customId("no", row),
-      disabled: locked,
-    },
+  return [
     {
       type: ComponentType.BUTTON,
       style: ButtonStyle.SECONDARY,
@@ -311,31 +381,32 @@ function decisionRow(row: number, decision: Decision): Button[] {
       custom_id: customId("feedback", row),
     },
   ];
-
-  return buttons;
 }
 
 /**
  * Shown once the vote splits. The directors talk it through wherever they talk,
- * and one of them records the result here.
+ * and one of them records where it landed.
  *
- * These stay visible after a final is recorded, so pressing the other one
- * corrects a misclick - there is no separate undo.
+ * Labelled by what happens next rather than by which way the vote went - "Final
+ * No" read like a conclusion when it was only a tally, and left cards sitting
+ * decided but with the applicant never told.
+ *
+ * Disappears once the split is resolved: from then on the outcome row carries
+ * the decision, so there is exactly one Reject button on the card.
  */
-function finalRow(row: number, decision: Decision): Button[] {
-  if (!hasSplit(decision)) return [];
-  const chosen = decision.final?.outcome;
+function finalRow(row: number, decision: Decision, outcome?: OutcomeRecord): Button[] {
+  if (!hasSplit(decision) || decision.final || outcome) return [];
   return [
     {
       type: ComponentType.BUTTON,
-      style: chosen === "yes" ? ButtonStyle.SUCCESS : ButtonStyle.SECONDARY,
-      label: "Final Yes",
+      style: ButtonStyle.SUCCESS,
+      label: "Move onto Interview",
       custom_id: customId("final-yes", row),
     },
     {
       type: ComponentType.BUTTON,
-      style: chosen === "no" ? ButtonStyle.DANGER : ButtonStyle.SECONDARY,
-      label: "Final No",
+      style: ButtonStyle.DANGER,
+      label: "Reject from RISK",
       custom_id: customId("final-no", row),
     },
   ];
@@ -460,18 +531,34 @@ export function buildDancerCard(row: ApplicationRow, opts: CardOptions): Message
     blocks.push(`⚠️ Not configured in columns.ts: ${unconfigured.join(", ")}`);
   }
 
-  const rows: Button[][] = [];
-  if (decision && decidable) {
-    rows.push(decisionRow(row.row, decision));
-    const final = finalRow(row.row, decision);
-    if (final.length > 0) rows.push(final);
+  const subunitsColumn = CARD_COLUMNS.find((c) => c.key === "subunits")?.column ?? null;
+  const placement = placementRow(row.row, cell(row.values, subunitsColumn), opts.pending);
+  if (placement.length > 0) {
+    blocks.push(
+      `⏳ **Waiting on placement** — pick below, then write the feedback that goes in the email.`,
+    );
   }
-  if (decidable) {
-    const interview = interviewRow(row.row, status, opts.interview, opts.outcome);
-    if (interview.length > 0) rows.push(interview);
 
-    const outcome = outcomeRow(row.row, status, opts.interview, opts.outcome);
-    if (outcome.length > 0) rows.push(outcome);
+  const rows: RowComponent[][] = [];
+
+  // Mid-decision the card shows only what's being asked for. Everything else is
+  // hidden, which also keeps the whole card inside Discord's five action rows.
+  if (placement.length > 0) {
+    rows.push(placement);
+  } else {
+    if (decision && decidable) {
+      rows.push(voteRow(row.row, cell(row.values, subunitsColumn), hasSplit(decision)));
+      rows.push(decisionRow(row.row, decision));
+      const final = finalRow(row.row, decision, opts.outcome);
+      if (final.length > 0) rows.push(final);
+    }
+    if (decidable) {
+      const interview = interviewRow(row.row, status, opts.interview, opts.outcome);
+      if (interview.length > 0) rows.push(interview);
+
+      const outcome = outcomeRow(row.row, status, opts.interview, opts.outcome);
+      if (outcome.length > 0) rows.push(outcome);
+    }
   }
 
   const utility: Button[] = [];

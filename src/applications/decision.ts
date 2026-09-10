@@ -1,18 +1,36 @@
 /**
  * Decision votes and director feedback (design doc rank 23). Pure.
  *
- *   [Yes] [No] [Need to discuss] - each click recorded, tally on the card.
- *   [Need to discuss] is a hold, not a vote.
- *   Split votes flip the card to a discussion state.
- *   Unanimous Yes unlocks [Send acceptance].
+ * The doc frames this as [Yes] [No], but the real question isn't whether to take
+ * someone - it's *which subunits* to take them into, or none. So a ballot is a
+ * set of subunits, and an empty set is the "no".
  *
- * "Unanimous among whom?" is the doc's own open question 3. This implements its
- * suggested default: every director has balloted, at least `minVotes` of them,
- * and no hold outstanding.
+ * Agreement is exact: ballots must match. Hearts and Hearts+Clubs is a split,
+ * not a narrower yes. Placement decides which room someone spends their season
+ * in, so near-agreement isn't treated as agreement.
+ *
+ * [Need to discuss] remains a hold, not a vote.
  */
 import { escapeMd, mention, truncate } from "./text";
 
-export type Ballot = "yes" | "no" | "hold";
+/**
+ * The subunits one director voted to accept them into.
+ *   []       - accept into none, i.e. a no
+ *   "hold"   - [Need to discuss]; blocks settlement without being a vote
+ */
+export type Ballot = string[] | "hold";
+
+export function isHold(ballot: Ballot | undefined): ballot is "hold" {
+  return ballot === "hold";
+}
+
+/** Order-insensitive comparison - picking Hearts,Clubs equals Clubs,Hearts. */
+function sameSet(a: readonly string[], b: readonly string[]): boolean {
+  if (a.length !== b.length) return false;
+  const left = [...a].sort();
+  const right = [...b].sort();
+  return left.every((value, i) => value === right[i]);
+}
 
 export interface FeedbackEntry {
   text: string;
@@ -36,6 +54,8 @@ export interface Decision {
   final?: FinalDecision;
   /** Set once the split has been announced, so it announces once. */
   pingedDiscussion?: boolean;
+  /** Same, for the vote reaching a decision on its own. */
+  pingedSettled?: boolean;
 }
 
 export function emptyDecision(): Decision {
@@ -50,7 +70,9 @@ export function emptyDecision(): Decision {
 export type DecisionStatus = "new" | "in-review" | "discussing" | "accepted" | "rejected";
 
 export interface Tally {
-  yes: number;
+  /** How many directors voted for each subunit. */
+  bySubunit: Record<string, number>;
+  /** Voted to accept into nothing. */
   no: number;
   hold: number;
   /** Votes only - a hold is not a vote. */
@@ -58,24 +80,64 @@ export interface Tally {
 }
 
 export function tally(decision: Decision): Tally {
-  let yes = 0;
+  const bySubunit: Record<string, number> = {};
   let no = 0;
   let hold = 0;
+  let cast = 0;
+
   for (const ballot of Object.values(decision.ballots)) {
-    if (ballot === "yes") yes++;
-    else if (ballot === "no") no++;
-    else hold++;
+    if (isHold(ballot)) {
+      hold++;
+      continue;
+    }
+    cast++;
+    if (ballot.length === 0) no++;
+    for (const unit of ballot) bySubunit[unit] = (bySubunit[unit] ?? 0) + 1;
   }
-  return { yes, no, hold, cast: yes + no };
+  return { bySubunit, no, hold, cast };
+}
+
+/** The ballots actually cast, holds excluded. */
+function castBallots(decision: Decision): string[][] {
+  return Object.values(decision.ballots).filter(
+    (b): b is string[] => !isHold(b),
+  );
 }
 
 /**
- * A split vote. Locks the Yes/No/Discuss buttons (design doc s23) and puts the
- * [Final Yes] / [Final No] pair on the card.
+ * The placement everyone voted for, or null if they didn't all vote the same.
+ *
+ * Requires every director to have voted - a set two out of three agree on isn't
+ * agreement while the third is still thinking.
+ */
+export function agreedPlacement(
+  decision: Decision,
+  directorIds: readonly string[],
+): string[] | null {
+  if (directorIds.length === 0) return null;
+
+  const ballots: string[][] = [];
+  for (const id of directorIds) {
+    const ballot = decision.ballots[id];
+    if (ballot === undefined || isHold(ballot)) return null;
+    ballots.push(ballot);
+  }
+
+  const first = ballots[0];
+  if (!first) return null;
+  return ballots.every((b) => sameSet(b, first)) ? [...first].sort() : null;
+}
+
+/**
+ * A split. Any difference between cast ballots counts - Hearts versus
+ * Hearts+Clubs is a disagreement about placement, not a narrower yes.
  */
 export function hasSplit(decision: Decision): boolean {
-  const t = tally(decision);
-  return t.yes > 0 && t.no > 0;
+  const ballots = castBallots(decision);
+  if (ballots.length < 2) return false;
+  const first = ballots[0];
+  if (!first) return false;
+  return !ballots.every((b) => sameSet(b, first));
 }
 
 export function decisionStatus(
@@ -87,23 +149,17 @@ export function decisionStatus(
   if (decision.final) return decision.final.outcome === "yes" ? "accepted" : "rejected";
 
   const t = tally(decision);
-  if (t.yes === 0 && t.no === 0 && t.hold === 0) return "new";
+  if (t.cast === 0 && t.hold === 0) return "new";
 
   if (hasSplit(decision)) return "discussing";
 
   // A hold blocks settlement without being a vote.
   if (t.hold > 0) return "in-review";
-  if (directorIds.length === 0) return "in-review";
+  if (t.cast < minVotes) return "in-review";
 
-  const allBalloted = directorIds.every((id) => {
-    const ballot = decision.ballots[id];
-    return ballot === "yes" || ballot === "no";
-  });
-  if (!allBalloted || t.cast < minVotes) return "in-review";
-
-  if (t.no === 0) return "accepted";
-  if (t.yes === 0) return "rejected";
-  return "in-review";
+  const agreed = agreedPlacement(decision, directorIds);
+  if (agreed === null) return "in-review";
+  return agreed.length > 0 ? "accepted" : "rejected";
 }
 
 /** Decision buttons are live only in these states. */
@@ -137,16 +193,26 @@ const STATUS_LABEL: Record<DecisionStatus, string> = {
   new: "🗳️ No votes yet",
   "in-review": "🗳️ In review",
   discussing:
-    "🗣️ **Discussing** — split vote. Talk it through, then one of you records the outcome below.",
-  accepted: "✅ **Unanimous yes**",
-  rejected: "🚫 **Unanimous no**",
+    "🗣️ **Discussing** — you didn't all vote the same placement. Talk it through, then one of you records the outcome below.",
+  accepted: "✅ **Agreed**",
+  rejected: "🚫 **Agreed: no placement**",
 };
 
-function ballotLine(decision: Decision, ballot: Ballot): string[] {
-  const ids = Object.entries(decision.ballots)
-    .filter(([, value]) => value === ballot)
-    .map(([id]) => mention(id));
-  return ids.length > 0 ? [ids.join(" ")] : [];
+/** One line per director, so a split shows exactly where it disagrees. */
+function ballotLines(decision: Decision, directorIds: readonly string[]): string[] {
+  const lines: string[] = [];
+  for (const [id, ballot] of Object.entries(decision.ballots)) {
+    if (isHold(ballot)) {
+      lines.push(`${mention(id)} — 🗣️ needs to discuss`);
+    } else if (ballot.length === 0) {
+      lines.push(`${mention(id)} — none`);
+    } else {
+      lines.push(`${mention(id)} — ${[...ballot].sort().join(", ")}`);
+    }
+  }
+  const yetToVote = directorIds.filter((id) => decision.ballots[id] === undefined);
+  for (const id of yetToVote) lines.push(`${mention(id)} — *yet to vote*`);
+  return lines;
 }
 
 /** The decision block shown in the card's description. */
@@ -161,21 +227,27 @@ export function renderDecision(
 
   const lines: string[] = [];
   if (decision.final) {
-    const verdict = decision.final.outcome === "yes" ? "✅ **Final: yes**" : "🚫 **Final: no**";
-    lines.push(`${verdict} — recorded by ${mention(decision.final.by)} after discussion`);
+    const verdict =
+      decision.final.outcome === "yes"
+        ? "✅ **Moving onto interview**"
+        : "🚫 **Rejected from RISK**";
+    lines.push(`${verdict} — decided by ${mention(decision.final.by)} after discussion`);
   } else {
-    lines.push(STATUS_LABEL[status]);
+    const agreed = agreedPlacement(decision, directorIds);
+    lines.push(
+      status === "accepted" && agreed?.length
+        ? `✅ **Agreed: ${agreed.join(", ")}**`
+        : STATUS_LABEL[status],
+    );
   }
 
-  if (t.yes + t.no + t.hold > 0) {
-    lines.push(`Yes ${t.yes} · No ${t.no} · Discuss ${t.hold}`);
-    for (const [label, ballot] of [
-      ["Yes", "yes"],
-      ["No", "no"],
-      ["Discuss", "hold"],
-    ] as const) {
-      for (const who of ballotLine(decision, ballot)) lines.push(`${label}: ${who}`);
-    }
+  if (t.cast + t.hold > 0) {
+    const counts = Object.entries(t.bySubunit)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([unit, n]) => `${unit} ${n}`);
+    if (t.no > 0) counts.push(`none ${t.no}`);
+    if (counts.length > 0) lines.push(counts.join(" · "));
+    lines.push(...ballotLines(decision, directorIds));
   }
 
   if (directorIds.length === 0) {
@@ -203,9 +275,29 @@ export interface OutcomeRecord {
   outcome: ApplicationOutcome;
   by: string;
   at: string;
+  /**
+   * Placement, for welcomed and waitlisted. Kept on a waitlist record so a
+   * "a Spades spot opened" sweep can find the right people rather than everyone.
+   */
+  subunits?: string[];
+  /** Feedback as it was actually sent, composed at outcome time. */
+  feedback?: string;
+  /** When a waitlisted applicant should resurface for another look. */
+  revisitAt?: string;
   /** The draft carrying the email, until it is approved. */
   draftId?: string;
   sentAt?: string;
+}
+
+/**
+ * A decision part-way through being made: the button is pressed, but placement
+ * and feedback are still being collected. Held on the record rather than encoded
+ * in a custom_id, which caps at 100 characters.
+ */
+export interface PendingOutcome {
+  outcome: ApplicationOutcome;
+  subunits?: string[];
+  startedBy: string;
 }
 
 export const OUTCOME_LABEL: Record<ApplicationOutcome, string> = {
@@ -224,21 +316,26 @@ export function outcomeTemplateKey(
   return wantsFeedback ? "rejection with feedback" : "rejection without feedback";
 }
 
+function unixOf(iso: string): number {
+  return Math.floor(new Date(iso).getTime() / 1000);
+}
+
 export function renderOutcomeLine(record: OutcomeRecord): string {
   const who = mention(record.by);
+  const placement = record.subunits?.length ? ` — **${record.subunits.join(", ")}**` : "";
+  const pending = record.sentAt ? " — email sent" : " — ⚠️ drafted, not sent yet";
+
   switch (record.outcome) {
     case "welcomed":
-      return record.sentAt
-        ? `🎉 **Welcomed into RISK** — acceptance sent, recorded by ${who}.`
-        : `🎉 **Welcomed into RISK** by ${who} — ⚠️ acceptance drafted, not sent yet.`;
+      return `🎉 **Welcomed into RISK**${placement}, recorded by ${who}${pending}.`;
     case "rejected":
-      return record.sentAt
-        ? `🚫 **Rejected** — notice sent, recorded by ${who}.`
-        : `🚫 **Rejected** by ${who} — ⚠️ notice drafted, not sent yet.`;
-    case "waitlisted":
-      return record.sentAt
-        ? `⏸️ **Waitlisted** — notice sent, recorded by ${who}.`
-        : `⏸️ **Waitlisted** by ${who} — ⚠️ notice drafted, not sent yet.`;
+      return `🚫 **Rejected**, recorded by ${who}${pending}.`;
+    case "waitlisted": {
+      const revisit = record.revisitAt
+        ? `\nResurfaces <t:${unixOf(record.revisitAt)}:R> — or sooner if a spot opens.`
+        : "";
+      return `⏸️ **Waitlisted** for${placement || " a spot"}, recorded by ${who}${pending}.${revisit}`;
+    }
   }
 }
 

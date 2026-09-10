@@ -222,7 +222,7 @@ export async function editAndPublishDraft(
   return publish(env, claimed.draft, actor, content.trim(), "edited");
 }
 
-/** [Skip] — log, publish nothing. */
+/** [Discard] — log, publish nothing. */
 export async function skipDraft(
   env: Env,
   id: string,

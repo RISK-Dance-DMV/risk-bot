@@ -7,6 +7,12 @@
  * one - see commands/gate.ts.
  */
 
+/**
+ * Design doc §2's permission list, plus VIEW_CHANNEL (needed to read anything)
+ * and CREATE_INSTANT_INVITE (acceptance emails carry a fresh, expiring invite).
+ */
+export const INVITE_PERMISSIONS = "562984581672019";
+
 export const ApplicationCommandOptionType = {
   SUB_COMMAND: 1,
   STRING: 3,
@@ -43,5 +49,36 @@ export const FORM_COMMAND = {
   ],
 } as const;
 
-/** Commands registered in the dance guild, where the director role lives. */
-export const DANCE_GUILD_COMMANDS = [FORM_COMMAND];
+export const WAITLIST_COMMAND = {
+  name: "waitlist",
+  description: "Bring waitlisted applicants back round",
+  default_member_permissions: "0",
+  dm_permission: false,
+  options: [
+    {
+      type: ApplicationCommandOptionType.SUB_COMMAND,
+      name: "open",
+      description: "A spot opened — show who's waiting for it",
+      options: [
+        {
+          type: ApplicationCommandOptionType.STRING,
+          name: "subunit",
+          description: "Which subunit has room",
+          required: true,
+          choices: [
+            { name: "Spades", value: "Spades" },
+            { name: "Hearts", value: "Hearts" },
+            { name: "Clubs", value: "Clubs" },
+          ],
+        },
+      ],
+    },
+  ],
+} as const;
+
+/**
+ * Registered in the community guild. Everything built so far — applications,
+ * decisions, interviews, drafts, email — lives there; the dance guild comes in
+ * with the trainee and money ranks.
+ */
+export const COMMUNITY_GUILD_COMMANDS = [FORM_COMMAND, WAITLIST_COMMAND];

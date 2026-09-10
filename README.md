@@ -130,6 +130,26 @@ fields written `{{name}}`. Point Apps Script at them:
 | `TEMPLATES_SHEET_ID` | spreadsheet holding the templates |
 | `TEMPLATES_SHEET_NAME` | tab name, defaults to `Templates` |
 
+### What each template may use
+
+Keys and field names match loosely — case, underscores and hyphens don't matter,
+so `interview_invitation` and `{{NAME}}` both work. **Any `{{…}}` the code
+doesn't fill refuses the draft**, so a template can't go out half-rendered.
+
+| Template | Fields available |
+| --- | --- |
+| `interview invitation` | `{{name}}` `{{slot}}` |
+| `acceptance` | `{{name}}` `{{subunits}}` `{{feedback}}` `{{community_invite}}` `{{dance_invite}}` |
+| `rejection with feedback` | `{{name}}` `{{feedback}}` |
+| `rejection without feedback` | `{{name}}` |
+| `waitlist notice` | `{{name}}` `{{subunits}}` `{{feedback}}` |
+
+Invites are **minted per acceptance** and expire after `config:invite_days`
+(default 10), so no stale link sits in a template. The two guilds need distinct
+field names — `{{community_invite}}` and `{{dance_invite}}` — because identical
+placeholders can't be filled differently. Minting needs `CREATE_INSTANT_INVITE`
+and a target channel per guild (`CH_COMMUNITY_INVITE`, `CH_DANCE_INVITE`).
+
 Sending goes through **rank 6**, with an email target instead of a channel:
 
 ```ts
@@ -187,7 +207,7 @@ The draft posts to the confirmation channel with three buttons:
 | --- | --- |
 | `[Approve]` | publishes verbatim |
 | `[Edit]` | modal prefilled with the draft, publishes the edited text |
-| `[Skip]` | logged, publishes nothing |
+| `[Discard]` | logged, publishes nothing |
 
 Once actioned the draft message repaints with the outcome, the buttons go, and
 approved drafts link to what was published. Every click is recorded with who made
@@ -268,7 +288,7 @@ box withdraws yours. Until then the card shows only `2 of 3 in`.
 Directors are an explicit list, not a role:
 
 ```bash
-npx wrangler kv key put --binding=KV config:director_ids "111,222,333" --remote
+npx wrangler kv:key put --binding=KV config:director_ids "111,222,333" --preview false
 ```
 
 Doc §2 rules out privileged intents, and enumerating a role's members over REST
@@ -337,17 +357,19 @@ place at the right row number.
 npx wrangler kv namespace create KV
 ```
 
-Put the returned ids in `wrangler.toml`, then set secrets:
+Put the returned ids in `wrangler.toml`, then set the **real** secrets — Discord
+and guild IDs are not secrets and live in `wrangler.toml` under `[vars]`:
 
 ```bash
 npx wrangler secret put DISCORD_PUBLIC_KEY
 npx wrangler secret put DISCORD_BOT_TOKEN
-npx wrangler secret put GUILD_COMMUNITY_ID
-npx wrangler secret put GUILD_DANCE_ID
 npx wrangler secret put APPS_SCRIPT_URL
 npx wrangler secret put APPS_SCRIPT_SECRET
 npx wrangler secret put INBOUND_SECRET
 ```
+
+A secret shadows a `[vars]` entry of the same name, so if you ever set an ID as a
+secret, `npx wrangler secret delete <NAME>` it.
 
 Set the Discord app's Interactions Endpoint URL to `https://<worker>/interactions`.
 
@@ -357,9 +379,19 @@ Set the Discord app's Interactions Endpoint URL to `https://<worker>/interaction
 npm run register
 ```
 
+Commands register to the **community** guild — everything built so far
+(applications, decisions, interviews, drafts, email) runs there. The dance guild
+arrives with the trainee and money ranks.
+
 Then grant directors access in Server Settings → Integrations → RISK bot. Those
 overrides hang off the command's ID, so the script uses POST (which upserts by
 name and keeps the ID) rather than a bulk overwrite.
+
+Invite the bot with your doc §2's permissions, plus `View Channel`:
+
+```
+https://discord.com/oauth2/authorize?client_id=<app id>&permissions=562984581672018&scope=bot+applications.commands
+```
 
 **Apps Script** — paste `apps-script/Code.gs` into a script owned by the RISK
 account. Set script properties `APPS_SCRIPT_SECRET`, `INBOUND_SECRET`,
@@ -383,8 +415,17 @@ two jobs.
 **Turn it on** (off by default):
 
 ```bash
-npx wrangler kv key put --binding=KV config:features.applications true --remote
+npx wrangler kv:key put --binding=KV config:features.applications true --preview false
 ```
+
+> **KV syntax is version-dependent and fails quietly.** On wrangler 3 it's
+> `kv:key` with `--preview false`; wrangler 4 uses `kv key` with `--remote`.
+> Using the wrong one prints a help page and exits 0, so nothing is written and
+> nothing looks wrong. Always read back what you wrote:
+>
+> ```bash
+> npx wrangler kv:key list --binding=KV --preview false
+> ```
 
 ## Notes on choices
 

@@ -3,7 +3,7 @@
  *
  *   [Approve] -> publish verbatim
  *   [Edit]    -> modal prefilled with the draft -> publish edited
- *   [Skip]    -> log, publish nothing
+ *   [Discard] -> log, publish nothing (doc calls this [Skip])
  *
  * "Every message intended for humans goes through this." It is the safety
  * property the rest of the design rests on, so it has no feature flag - a draft
@@ -138,7 +138,7 @@ export function renderDraft(draft: Draft): MessagePayload {
           {
             type: ComponentType.BUTTON,
             style: ButtonStyle.SECONDARY,
-            label: "Skip",
+            label: "Discard",
             custom_id: draftCustomId("skip", draft.id),
           },
         ],

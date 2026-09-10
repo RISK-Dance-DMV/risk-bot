@@ -3,11 +3,21 @@ import type { AuditionMethod } from "../config/columns";
 import { getDirectorIds } from "../config/directors";
 import { isEnabled } from "../config/flags";
 import { getNumber } from "../config/settings";
-import { alertDirectors, editMessage, postToChannelByName } from "../discord/rest";
+import {
+  alertDirectors,
+  editMessage,
+  postMessage,
+  postToChannelByName,
+} from "../discord/rest";
 import type { MessagePayload } from "../discord/types";
 import type { Env } from "../env";
 import { buildIntakeMessage, type CardState } from "./card";
-import { emptyDecision, type Decision, type OutcomeRecord } from "./decision";
+import {
+  emptyDecision,
+  type Decision,
+  type OutcomeRecord,
+  type PendingOutcome,
+} from "./decision";
 import { parseRow, verifyPinnedHeaders, type ApplicationRow } from "./fields";
 import type { InterviewRecord } from "./interviewSlot";
 import { buildSheetRowUrl } from "./sheetLink";
@@ -40,6 +50,7 @@ export interface CardRecord {
   decision?: Decision;
   interview?: InterviewRecord;
   outcome?: OutcomeRecord;
+  pending?: PendingOutcome;
 }
 
 export const CARDED_PREFIX = "app:carded:";
@@ -57,6 +68,31 @@ export async function putRecord(env: Env, record: CardRecord): Promise<void> {
 
 export function sheetRowUrl(env: Env, row: number): string | undefined {
   return buildSheetRowUrl(env.APPLICATION_SHEET_URL ?? "", row);
+}
+
+/**
+ * Posts a new message about a card, mentioning the directors.
+ *
+ * Always a new message, never an edit: Discord doesn't notify on edits, so a
+ * card changing state on its own is invisible to anyone not already looking.
+ */
+export async function announceOnCard(
+  env: Env,
+  record: CardRecord,
+  body: string,
+): Promise<void> {
+  const directorIds = await getDirectorIds(env);
+  if (directorIds.length === 0) return;
+
+  const link = `https://discord.com/channels/${env.GUILD_COMMUNITY_ID}/${record.channelId}/${record.messageId}`;
+  try {
+    await postMessage(env, record.channelId, {
+      content: `${directorIds.map((id) => `<@${id}>`).join(" ")} — ${body}\n${link}`,
+      allowed_mentions: { parse: [], users: directorIds },
+    });
+  } catch (err) {
+    console.error("announceOnCard failed", record.row, err);
+  }
 }
 
 /** RISK-process applicants wait on a second form; everyone else is reviewable now. */
@@ -104,6 +140,7 @@ export async function renderCard(
   decision: Decision,
   interview?: InterviewRecord,
   outcome?: OutcomeRecord,
+  pending?: PendingOutcome,
 ): Promise<MessagePayload> {
   const [directorIds, minVotes] = await Promise.all([
     getDirectorIds(env),
@@ -120,6 +157,7 @@ export async function renderCard(
     minVotes,
     interview,
     outcome,
+    pending,
   });
 }
 
@@ -189,6 +227,7 @@ export async function setCardState(
       decision,
       record.interview,
       record.outcome,
+      record.pending,
     ),
   );
 
@@ -228,6 +267,7 @@ export async function refreshCard(env: Env, record: CardRecord): Promise<void> {
       record.decision ?? emptyDecision(),
       record.interview,
       record.outcome,
+      record.pending,
     ),
   );
 }

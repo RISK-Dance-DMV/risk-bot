@@ -29,7 +29,16 @@ export const EXPECTED_TEMPLATE_KEYS = [
   "refund confirmation",
 ] as const;
 
-const MERGE_FIELD = /\{\{\s*([\w.-]+)\s*\}\}/g;
+/**
+ * Deliberately greedy about what counts as a merge field: anything between
+ * double braces, including spaces, commas and parentheses.
+ *
+ * A narrower pattern is worse than useless here. `{{DATE, TIME}}` wouldn't match
+ * it, so it would sail past the unfilled-field check and get emailed to a real
+ * applicant verbatim — the exact failure that check exists to prevent. Better to
+ * treat anything brace-wrapped as a field and refuse to send.
+ */
+const MERGE_FIELD = /\{\{\s*([^{}]*?)\s*\}\}/g;
 
 function columnIndex(headers: readonly string[], name: string): number {
   return headers.findIndex(
@@ -64,9 +73,19 @@ export function parseTemplates(page: SheetPage): Template[] {
   return templates;
 }
 
+/**
+ * Template keys and merge fields are matched loosely: case-insensitive, and
+ * underscores/hyphens treated as spaces. `interview_invitation` and
+ * `Interview Invitation` are the same template; `{{NAME}}` and `{{name}}` are the
+ * same field. Whoever writes the sheet shouldn't have to guess a convention.
+ */
+function loosely(value: string): string {
+  return value.trim().toLowerCase().replace(/[_-]+/g, " ").replace(/\s+/g, " ");
+}
+
 export function findTemplate(templates: Template[], key: string): Template | undefined {
-  const wanted = key.trim().toLowerCase();
-  return templates.find((t) => t.key.trim().toLowerCase() === wanted);
+  const wanted = loosely(key);
+  return templates.find((t) => loosely(t.key) === wanted);
 }
 
 export function mergeFieldsIn(text: string): string[] {
@@ -87,10 +106,14 @@ export function renderTemplate(
   template: Template,
   merge: Record<string, string>,
 ): RenderResult {
+  const byLooseName = new Map<string, string>();
+  for (const [field, value] of Object.entries(merge)) {
+    if (value !== "") byLooseName.set(loosely(field), value);
+  }
+
   const substitute = (text: string): string =>
     text.replace(MERGE_FIELD, (whole, field: string) => {
-      const value = merge[field];
-      return value === undefined || value === "" ? whole : value;
+      return byLooseName.get(loosely(field)) ?? whole;
     });
 
   const subject = substitute(template.subject);

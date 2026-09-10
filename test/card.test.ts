@@ -8,7 +8,11 @@ import {
   type CardOptions,
   type CardState,
 } from "../src/applications/card";
-import { emptyDecision, type Decision } from "../src/applications/decision";
+import {
+  emptyDecision,
+  type Ballot,
+  type Decision,
+} from "../src/applications/decision";
 import type { InterviewRecord } from "../src/applications/interviewSlot";
 import { parseRow } from "../src/applications/fields";
 import type { MessagePayload } from "../src/discord/types";
@@ -316,7 +320,7 @@ describe("when decision buttons appear", () => {
 
   it("hides them while a RISK-process applicant hasn't submitted", () => {
     const ids = buttonIds(withDecision("awaiting"));
-    expect(ids).not.toContain("app|yes|12");
+    expect(ids).not.toContain("app|vote|12");
     expect(ids).toContain("app|open|12");
   });
 
@@ -326,17 +330,17 @@ describe("when decision buttons appear", () => {
 
   it("shows them as soon as a RISK-process audition is submitted", () => {
     const ids = buttonIds(withDecision("submitted"));
-    expect(ids).toEqual(expect.arrayContaining(["app|yes|12", "app|no|12", "app|hold|12"]));
+    expect(ids).toEqual(expect.arrayContaining(["app|vote|12", "app|hold|12"]));
   });
 
   it("shows them immediately for an existing-links applicant", () => {
     const ids = buttonIds(withDecision("open"));
-    expect(ids).toEqual(expect.arrayContaining(["app|yes|12", "app|feedback|12"]));
+    expect(ids).toEqual(expect.arrayContaining(["app|vote|12", "app|feedback|12"]));
   });
 
   it("hides them on a closed card", () => {
     const ids = buttonIds(withDecision("closed"));
-    expect(ids).not.toContain("app|yes|12");
+    expect(ids).not.toContain("app|vote|12");
     expect(ids).toContain("app|reopen|12");
   });
 });
@@ -347,7 +351,7 @@ describe("split votes on the card", () => {
       makeRow(),
       opts({
         state: "open",
-        decision: { ...emptyDecision(), ballots: { d1: "yes", d2: "no" }, ...over },
+        decision: { ...emptyDecision(), ballots: { d1: ["Hearts"], d2: [] }, ...over },
         directorIds: ["d1", "d2"],
         minVotes: 2,
       }),
@@ -357,9 +361,9 @@ describe("split votes on the card", () => {
     (msg.components as { components: { custom_id?: string; disabled?: boolean }[] }[])
       .flatMap((row) => row.components);
 
-  it("locks the vote buttons and offers a recorded outcome instead", () => {
+  it("locks the ballot and offers a recorded outcome instead", () => {
     const all = buttons(split());
-    const vote = all.find((b) => b.custom_id === "app|yes|12");
+    const vote = all.find((b) => b.custom_id === "app|vote|12");
     expect(vote?.disabled).toBe(true);
     expect(all.map((b) => b.custom_id)).toEqual(
       expect.arrayContaining(["app|final-yes|12", "app|final-no|12"]),
@@ -371,11 +375,13 @@ describe("split votes on the card", () => {
     expect(feedback?.disabled).toBeUndefined();
   });
 
-  it("keeps both final buttons after one is pressed, so a misclick is correctable", () => {
+  it("retires the split buttons once it is resolved, leaving one Reject on the card", () => {
     const ids = buttons(split({ final: { outcome: "yes", by: "d1", at: "x" } })).map(
       (b) => b.custom_id,
     );
-    expect(ids).toEqual(expect.arrayContaining(["app|final-yes|12", "app|final-no|12"]));
+    expect(ids).not.toContain("app|final-yes|12");
+    expect(ids).not.toContain("app|final-no|12");
+    expect(ids.filter((id) => id === "app|outcome-reject|12")).toHaveLength(1);
   });
 
   it("unlocks the outcome buttons once a final is recorded", () => {
@@ -408,7 +414,7 @@ describe("split votes on the card", () => {
 
 describe("outcome buttons", () => {
   const decided = (
-    ballots: Record<string, "yes" | "no">,
+    ballots: Record<string, Ballot>,
     over: Partial<CardOptions> = {},
   ) =>
     buildIntakeMessage(
@@ -428,7 +434,7 @@ describe("outcome buttons", () => {
       .map((b) => b.custom_id ?? "");
 
   it("offers all three once the vote is a unanimous yes", () => {
-    expect(ids(decided({ d1: "yes" }))).toEqual(
+    expect(ids(decided({ d1: ["Hearts"] }))).toEqual(
       expect.arrayContaining([
         "app|outcome-welcome|12",
         "app|outcome-reject|12",
@@ -438,7 +444,7 @@ describe("outcome buttons", () => {
   });
 
   it("never puts a welcome button under a unanimous no", () => {
-    const after = ids(decided({ d1: "no" }));
+    const after = ids(decided({ d1: [] }));
     expect(after).not.toContain("app|outcome-welcome|12");
     expect(after).toEqual(
       expect.arrayContaining(["app|outcome-reject|12", "app|outcome-waitlist|12"]),
@@ -447,7 +453,7 @@ describe("outcome buttons", () => {
 
   it("keeps all three visible after one is chosen, so a misclick is correctable", () => {
     const after = ids(
-      decided({ d1: "no" }, { outcome: { outcome: "waitlisted", by: "d1", at: "x" } }),
+      decided({ d1: [] }, { outcome: { outcome: "waitlisted", by: "d1", at: "x" } }),
     );
     expect(after).toEqual(
       expect.arrayContaining([
@@ -459,22 +465,22 @@ describe("outcome buttons", () => {
   });
 
   it("says on the card that the email is drafted but not sent", () => {
-    const msg = decided({ d1: "yes" }, { outcome: { outcome: "welcomed", by: "d1", at: "x" } });
+    const msg = decided({ d1: ["Hearts"] }, { outcome: { outcome: "welcomed", by: "d1", at: "x" } });
     expect(firstEmbedDescription(msg)).toContain("not sent yet");
   });
 
   it("says it was sent once the draft is published", () => {
     const msg = decided(
-      { d1: "yes" },
+      { d1: ["Hearts"] },
       { outcome: { outcome: "welcomed", by: "d1", at: "x", sentAt: "y" } },
     );
     const desc = firstEmbedDescription(msg);
-    expect(desc).toContain("acceptance sent");
+    expect(desc).toContain("email sent");
     expect(desc).not.toContain("not sent yet");
   });
 
   it("records the outcome in the footer", () => {
-    const msg = decided({ d1: "yes" }, { outcome: { outcome: "waitlisted", by: "d1", at: "x" } });
+    const msg = decided({ d1: ["Hearts"] }, { outcome: { outcome: "waitlisted", by: "d1", at: "x" } });
     expect(embedJson(msg)).toContain("· waitlisted");
   });
 });
@@ -491,7 +497,7 @@ describe("interview buttons", () => {
   });
 
   /** Interviews need a unanimous yes behind them, so these cards carry one. */
-  const card = (state: CardState, iv?: InterviewRecord, ballots: Record<string, "yes" | "no"> = { d1: "yes" }) =>
+  const card = (state: CardState, iv?: InterviewRecord, ballots: Record<string, Ballot> = { d1: ["Hearts"] }) =>
     buildIntakeMessage(
       makeRow({
         method:
@@ -530,7 +536,7 @@ describe("interview buttons", () => {
   });
 
   it("never offers an interview to someone the directors rejected", () => {
-    expect(ids(card("open", undefined, { d1: "no" }))).not.toContain("app|interview|12");
+    expect(ids(card("open", undefined, { d1: [] }))).not.toContain("app|interview|12");
   });
 
   it("stops offering an interview once an outcome is recorded", () => {
@@ -538,7 +544,7 @@ describe("interview buttons", () => {
       makeRow(),
       opts({
         state: "open",
-        decision: { ...emptyDecision(), ballots: { d1: "yes" } },
+        decision: { ...emptyDecision(), ballots: { d1: ["Hearts"] } },
         directorIds: ["d1"],
         minVotes: 1,
         outcome: { outcome: "welcomed", by: "d1", at: "x" },
@@ -580,7 +586,7 @@ describe("interview buttons", () => {
         state: "open",
         decision: {
           ...emptyDecision(),
-          ballots: { d1: "yes", d2: "no" },
+          ballots: { d1: ["Hearts"], d2: [] },
           final: { outcome: "yes", by: "d1", at: "x" },
         },
         directorIds: ["d1", "d2"],
@@ -590,5 +596,186 @@ describe("interview buttons", () => {
       }),
     );
     expect((msg.components as unknown[]).length).toBeLessThanOrEqual(5);
+  });
+});
+
+describe("placement select", () => {
+  const pendingCard = (outcome: "welcomed" | "rejected" | "waitlisted", appliedFor: string) =>
+    buildIntakeMessage(
+      makeRow({ fields: { I: appliedFor } }),
+      opts({
+        state: "open",
+        decision: { ...emptyDecision(), ballots: { d1: ["Hearts"] } },
+        directorIds: ["d1"],
+        minVotes: 1,
+        pending: { outcome, startedBy: "d1" },
+      }),
+    );
+
+  /** By custom_id, not by type — the ballot is a select too. */
+  const select = (msg: MessagePayload) =>
+    (
+      msg.components as {
+        components: { custom_id?: string; options?: { value: string }[] }[];
+      }[]
+    )
+      .flatMap((row) => row.components)
+      .find((c) => c.custom_id === "app|placement|12");
+
+  it("offers only the subunits they auditioned for", () => {
+    const options = select(pendingCard("welcomed", "Hearts, Clubs"))?.options;
+    expect(options?.map((o) => o.value)).toEqual(["Hearts", "Clubs"]);
+  });
+
+  it("falls back to all three rather than blocking on an odd answer", () => {
+    const options = select(pendingCard("welcomed", "whichever you think"))?.options;
+    expect(options?.map((o) => o.value)).toEqual(["Spades", "Hearts", "Clubs"]);
+  });
+
+  it("appears for a waitlist too, since that records an offer", () => {
+    expect(select(pendingCard("waitlisted", "Spades"))).toBeDefined();
+  });
+
+  it("never appears for a rejection, which has no placement", () => {
+    expect(select(pendingCard("rejected", "Spades"))).toBeUndefined();
+  });
+
+  it("says on the card what it's waiting for", () => {
+    expect(firstEmbedDescription(pendingCard("welcomed", "Hearts"))).toContain(
+      "Waiting on placement",
+    );
+  });
+
+  it("isn't there when no decision is in flight", () => {
+    const msg = buildIntakeMessage(
+      makeRow({ fields: { I: "Hearts" } }),
+      opts({ state: "open", decision: emptyDecision(), directorIds: ["d1"], minVotes: 1 }),
+    );
+    expect(select(msg)).toBeUndefined();
+  });
+});
+
+describe("resolving a split", () => {
+  const split = () =>
+    buildIntakeMessage(
+      makeRow(),
+      opts({
+        state: "open",
+        decision: { ...emptyDecision(), ballots: { d1: ["Hearts"], d2: [] } },
+        directorIds: ["d1", "d2"],
+        minVotes: 2,
+      }),
+    );
+
+  const labelsOf = (msg: MessagePayload): string[] =>
+    (msg.components as { components: { label?: string }[] }[])
+      .flatMap((r) => r.components)
+      .map((b) => b.label ?? "");
+
+  it("names the buttons by what happens next, not by which way the vote went", () => {
+    expect(labelsOf(split())).toEqual(
+      expect.arrayContaining(["Move onto Interview", "Reject from RISK"]),
+    );
+    expect(labelsOf(split())).not.toContain("Final Yes");
+  });
+
+  it("offers no outcome buttons until the split is settled", () => {
+    const ids = (split().components as { components: { custom_id?: string }[] }[])
+      .flatMap((r) => r.components)
+      .map((b) => b.custom_id ?? "");
+    expect(ids.some((id) => id.startsWith("app|outcome-"))).toBe(false);
+  });
+});
+
+describe("the ballot", () => {
+  const ballotCard = (appliedFor: string, decision = emptyDecision()) =>
+    buildIntakeMessage(
+      makeRow({ fields: { I: appliedFor } }),
+      opts({ state: "open", decision, directorIds: ["d1", "d2"], minVotes: 2 }),
+    );
+
+  const ballot = (msg: MessagePayload) =>
+    (
+      msg.components as {
+        components: {
+          custom_id?: string;
+          disabled?: boolean;
+          options?: { value: string; label: string }[];
+        }[];
+      }[]
+    )
+      .flatMap((r) => r.components)
+      .find((c) => c.custom_id === "app|vote|12");
+
+  it("offers the subunits they auditioned for, plus an explicit none", () => {
+    const options = ballot(ballotCard("Hearts, Clubs"))?.options;
+    expect(options?.map((o) => o.value)).toEqual(["Hearts", "Clubs", "__none__"]);
+  });
+
+  it("lets one director pick more than one subunit", () => {
+    const select = ballot(ballotCard("Spades, Hearts, Clubs")) as { max_values: number };
+    expect(select.max_values).toBe(4);
+  });
+
+  it("locks once the ballots disagree", () => {
+    const split = { ...emptyDecision(), ballots: { d1: ["Hearts"], d2: [] } };
+    expect(ballot(ballotCard("Hearts", split))?.disabled).toBe(true);
+  });
+
+  it("stays open while everyone still agrees", () => {
+    const agreeing = { ...emptyDecision(), ballots: { d1: ["Hearts"] } };
+    expect(ballot(ballotCard("Hearts", agreeing))?.disabled).toBe(false);
+  });
+
+  it("is replaced by the placement select while an outcome is being made", () => {
+    const msg = buildIntakeMessage(
+      makeRow({ fields: { I: "Hearts" } }),
+      opts({
+        state: "open",
+        decision: { ...emptyDecision(), ballots: { d1: ["Hearts"] } },
+        directorIds: ["d1"],
+        minVotes: 1,
+        pending: { outcome: "welcomed", startedBy: "d1" },
+      }),
+    );
+    expect(ballot(msg)).toBeUndefined();
+    expect(JSON.stringify(msg.components)).toContain("app|placement|12");
+  });
+});
+
+describe("placement pre-selection", () => {
+  const seeded = (subunits?: string[]) =>
+    buildIntakeMessage(
+      makeRow({ fields: { I: "Spades, Hearts, Clubs" } }),
+      opts({
+        state: "open",
+        decision: { ...emptyDecision(), ballots: { d1: ["Hearts"] } },
+        directorIds: ["d1"],
+        minVotes: 1,
+        pending: { outcome: "welcomed", startedBy: "d1", ...(subunits ? { subunits } : {}) },
+      }),
+    );
+
+  const chosen = (msg: MessagePayload): string[] =>
+    (
+      msg.components as {
+        components: { custom_id?: string; options?: { value: string; default?: boolean }[] }[];
+      }[]
+    )
+      .flatMap((r) => r.components)
+      .find((c) => c.custom_id === "app|placement|12")
+      ?.options?.filter((o) => o.default)
+      .map((o) => o.value) ?? [];
+
+  it("pre-selects what the vote agreed on", () => {
+    expect(chosen(seeded(["Hearts"]))).toEqual(["Hearts"]);
+  });
+
+  it("pre-selects a multi-subunit placement in full", () => {
+    expect(chosen(seeded(["Hearts", "Clubs"]))).toEqual(["Hearts", "Clubs"]);
+  });
+
+  it("selects nothing after a split, where nothing was agreed", () => {
+    expect(chosen(seeded())).toEqual([]);
   });
 });

@@ -4,6 +4,7 @@ import {
   buildOpenRowResponse,
   isDirectorAction,
   parseCustomId,
+  VOTE_NONE,
   type CardAction,
 } from "./applications/card";
 import {
@@ -21,14 +22,23 @@ import {
   interviewModalFor,
   readInterviewModal,
 } from "./applications/interview";
-import { recordOutcome } from "./applications/outcome";
+import {
+  beginOutcome,
+  completeOutcome,
+  needsPlacement,
+  outcomeFeedbackModal,
+  readOutcomeModal,
+  setPlacement,
+} from "./applications/outcome";
 import { draftReply, readReplyModal, replyModalFor } from "./applications/reply";
+import { isSubunit, openSpot, runWaitlistRevisit } from "./applications/waitlist";
 import { runStaleSweep } from "./applications/stale";
 import {
   applyBallot,
   feedbackModalResponse,
   modalFeedbackValue,
   recordFinal,
+  rejectAfterDiscussion,
   saveFeedback,
 } from "./applications/vote";
 import {
@@ -151,20 +161,38 @@ async function runFormRegister(
   return handleFormRegister(env, type, url);
 }
 
+async function runWaitlistOpen(
+  env: Env,
+  interaction: Interaction,
+): Promise<MessagePayload> {
+  const sub = subcommandOf(interaction);
+  if (!sub || sub.name !== "open") return { content: "Unknown /waitlist subcommand." };
+
+  const subunit = sub.options.get("subunit") ?? "";
+  if (!isSubunit(subunit)) return { content: `Unknown subunit: \`${subunit}\`.` };
+
+  return openSpot(env, subunit);
+}
+
 async function handleCommand(
   env: Env,
   interaction: Interaction,
   ctx: ExecutionContext,
 ): Promise<Response> {
-  if (interaction.data?.name !== "form") {
+  const name = interaction.data?.name;
+  if (name !== "form" && name !== "waitlist") {
     return json({
       type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
       data: { content: "Unhandled command.", flags: MessageFlags.EPHEMERAL },
     });
   }
 
+  // /waitlist is about applicants, so it belongs where the cards are.
+  const channel =
+    name === "waitlist" ? env.CH_AUDITION_REVIEW : env.CH_DIRECTORS_CONFIRMATION;
+
   // Layer 3 gating - the real one. Declines are ephemeral.
-  const declined = await declineReason(env, interaction, env.CH_DIRECTORS_CONFIRMATION);
+  const declined = await declineReason(env, interaction, channel);
   if (declined) {
     return json({
       type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
@@ -172,15 +200,19 @@ async function handleCommand(
     });
   }
 
-  // Opening the form and installing a trigger runs well past the 3s budget.
+  // Opening a form, installing a trigger, or scanning every card all run well
+  // past the 3s budget.
   ctx.waitUntil(
     (async () => {
       let payload: MessagePayload;
       try {
-        payload = await runFormRegister(env, interaction);
+        payload =
+          name === "waitlist"
+            ? await runWaitlistOpen(env, interaction)
+            : await runFormRegister(env, interaction);
       } catch (err) {
         payload = {
-          content: `Registration failed: ${err instanceof Error ? err.message : String(err)}`,
+          content: `That didn't go through: ${err instanceof Error ? err.message : String(err)}`,
         };
       }
       await editOriginalResponse(env, interaction.application_id, interaction.token, payload);
@@ -199,19 +231,24 @@ function callerId(interaction: Interaction): string | undefined {
 
 async function applyDecisionAction(
   env: Env,
+  interaction: Interaction,
   action: CardAction,
   row: number,
   userId: string,
 ): Promise<void> {
   switch (action) {
-    case "yes":
-    case "no":
     case "hold":
-      return applyBallot(env, row, userId, action);
+      return applyBallot(env, row, userId, "hold");
+    case "vote": {
+      // "None" is an explicit no, so it wins over anything picked alongside it.
+      const chosen = interaction.data?.values ?? [];
+      const subunits = chosen.includes(VOTE_NONE)
+        ? []
+        : chosen.filter((v) => v !== VOTE_NONE);
+      return applyBallot(env, row, userId, subunits);
+    }
     case "final-yes":
       return recordFinal(env, row, userId, "yes");
-    case "final-no":
-      return recordFinal(env, row, userId, "no");
     default:
       return;
   }
@@ -233,12 +270,8 @@ async function spokenAction(
       return () => draftInterview(env, row, userId, readInterviewModal(interaction));
     case "interview-confirm-save":
       return () => confirmInterview(env, row, userId, readInterviewModal(interaction));
-    case "outcome-welcome":
-      return () => recordOutcome(env, row, userId, "welcomed");
-    case "outcome-reject":
-      return () => recordOutcome(env, row, userId, "rejected");
-    case "outcome-waitlist":
-      return () => recordOutcome(env, row, userId, "waitlisted");
+    case "outcome-save":
+      return () => completeOutcome(env, row, userId, readOutcomeModal(interaction));
     case "reply-save":
       return () => draftReply(env, row, readReplyModal(interaction));
     default:
@@ -286,6 +319,47 @@ async function handleDecision(
     return json(await replyModalFor(env, row));
   }
 
+  // Rejecting after a discussion settles the split and opens the rejection in
+  // one move — the decision and telling them are the same act.
+  if (action === "final-no") {
+    const updated = await rejectAfterDiscussion(env, row, userId);
+    if (!updated) return json(ephemeral(`Row ${row} isn't open for decisions.`));
+    return json(outcomeFeedbackModal(row, updated));
+  }
+
+  // The three outcome buttons open a short flow rather than acting immediately:
+  // placement (unless it's a rejection), then the feedback the applicant reads.
+  if (
+    action === "outcome-welcome" ||
+    action === "outcome-reject" ||
+    action === "outcome-waitlist"
+  ) {
+    const outcome =
+      action === "outcome-welcome"
+        ? "welcomed"
+        : action === "outcome-reject"
+          ? "rejected"
+          : "waitlisted";
+
+    const begun = await beginOutcome(env, row, userId, outcome);
+    if (begun.snoozed) return json(ephemeral(begun.message.content ?? "Done."));
+
+    // A rejection needs no placement, so go straight to composing the message.
+    return needsPlacement(outcome)
+      ? json({ type: InteractionResponseType.DEFERRED_UPDATE_MESSAGE })
+      : json(outcomeFeedbackModal(row, begun.record));
+  }
+
+  // Placement chosen — the select's own interaction opens the feedback modal.
+  if (action === "placement") {
+    const chosen = interaction.data?.values ?? [];
+    const updated = await setPlacement(env, row, chosen);
+    if (!updated) {
+      return json(ephemeral("That decision timed out — press the button again."));
+    }
+    return json(outcomeFeedbackModal(row, updated));
+  }
+
   // These can fail in ways worth reading — a bad date, a missing template — so
   // they answer with a message rather than only redrawing the card.
   const spoken = await spokenAction(env, interaction, action, row, userId);
@@ -310,7 +384,7 @@ async function handleDecision(
   }
 
   ctx.waitUntil(
-    applyDecisionAction(env, action, row, userId).catch((err) =>
+    applyDecisionAction(env, interaction, action, row, userId).catch((err) =>
       console.error("decision failed", action, row, err),
     ),
   );
@@ -459,6 +533,7 @@ async function handleInteraction(
       if (
         parsed.action === "interview-save" ||
         parsed.action === "interview-confirm-save" ||
+        parsed.action === "outcome-save" ||
         parsed.action === "reply-save"
       ) {
         return handleDecision(env, interaction, ctx, parsed.action, parsed.row);
@@ -549,7 +624,8 @@ export default {
         const backstop = await runBackstop(env);
         const auditions = await runAuditionReconcile(env);
         const stale = await runStaleSweep(env);
-        return json({ ok: true, backstop, auditions, stale });
+        const waitlist = await runWaitlistRevisit(env);
+        return json({ ok: true, backstop, auditions, stale, waitlist });
       }
 
       default:

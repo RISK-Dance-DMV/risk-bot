@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  agreedPlacement,
   decisionStatus,
   emptyDecision,
   feedbackFields,
@@ -22,76 +23,155 @@ const decision = (
 ): Decision => ({ ...emptyDecision(), ballots, ...over });
 
 describe("tally", () => {
-  it("counts a hold separately, because a hold is not a vote", () => {
-    const t = tally(decision({ d1: "yes", d2: "no", d3: "hold" }));
-    expect(t).toEqual({ yes: 1, no: 1, hold: 1, cast: 2 });
+  it("counts votes per subunit, not for and against", () => {
+    const t = tally(
+      decision({ d1: ["Hearts"], d2: ["Hearts", "Clubs"], d3: [] }),
+    );
+    expect(t.bySubunit).toEqual({ Hearts: 2, Clubs: 1 });
+    expect(t.no).toBe(1);
+    expect(t.cast).toBe(3);
+  });
+
+  it("keeps a hold out of the vote count", () => {
+    const t = tally(decision({ d1: ["Hearts"], d2: "hold" }));
+    expect(t).toMatchObject({ hold: 1, cast: 1 });
   });
 });
 
 describe("hasSplit", () => {
-  it("is true only when yes and no are both present", () => {
-    expect(hasSplit(decision({ d1: "yes", d2: "no" }))).toBe(true);
-    expect(hasSplit(decision({ d1: "yes", d2: "yes" }))).toBe(false);
-    expect(hasSplit(decision({ d1: "yes", d2: "hold" }))).toBe(false);
+  it("treats any difference as a split, including a superset", () => {
+    expect(hasSplit(decision({ d1: ["Hearts"], d2: ["Hearts", "Clubs"] }))).toBe(true);
+  });
+
+  it("is false when the ballots match", () => {
+    expect(hasSplit(decision({ d1: ["Hearts"], d2: ["Hearts"] }))).toBe(false);
+  });
+
+  it("ignores the order subunits were picked in", () => {
+    expect(
+      hasSplit(decision({ d1: ["Hearts", "Clubs"], d2: ["Clubs", "Hearts"] })),
+    ).toBe(false);
+  });
+
+  it("counts accept-nobody against accept-someone as a split", () => {
+    expect(hasSplit(decision({ d1: ["Hearts"], d2: [] }))).toBe(true);
+  });
+
+  it("is false with a single ballot, or none", () => {
+    expect(hasSplit(decision({ d1: ["Hearts"] }))).toBe(false);
+    expect(hasSplit(emptyDecision())).toBe(false);
+  });
+
+  it("ignores holds when looking for disagreement", () => {
+    expect(hasSplit(decision({ d1: ["Hearts"], d2: "hold" }))).toBe(false);
+  });
+});
+
+describe("agreedPlacement", () => {
+  it("returns the set everyone voted", () => {
+    expect(
+      agreedPlacement(
+        decision({ d1: ["Hearts", "Clubs"], d2: ["Clubs", "Hearts"], d3: ["Hearts", "Clubs"] }),
+        DIRECTORS,
+      ),
+    ).toEqual(["Clubs", "Hearts"]);
+  });
+
+  it("returns an empty placement when everyone voted none", () => {
+    expect(agreedPlacement(decision({ d1: [], d2: [], d3: [] }), DIRECTORS)).toEqual([]);
+  });
+
+  it("is null while a director hasn't voted", () => {
+    expect(agreedPlacement(decision({ d1: ["Hearts"], d2: ["Hearts"] }), DIRECTORS)).toBeNull();
+  });
+
+  it("is null when a director is holding", () => {
+    expect(
+      agreedPlacement(decision({ d1: ["Hearts"], d2: ["Hearts"], d3: "hold" }), DIRECTORS),
+    ).toBeNull();
+  });
+
+  it("is null when they didn't vote the same", () => {
+    expect(
+      agreedPlacement(
+        decision({ d1: ["Hearts"], d2: ["Hearts"], d3: ["Hearts", "Clubs"] }),
+        DIRECTORS,
+      ),
+    ).toBeNull();
   });
 });
 
 describe("decisionStatus", () => {
-  it("is new before anyone clicks", () => {
+  it("is new before anyone votes", () => {
     expect(decisionStatus(emptyDecision(), DIRECTORS, 2)).toBe("new");
   });
 
   it("is in-review while votes are still coming in", () => {
-    expect(decisionStatus(decision({ d1: "yes" }), DIRECTORS, 2)).toBe("in-review");
+    expect(decisionStatus(decision({ d1: ["Hearts"] }), DIRECTORS, 2)).toBe("in-review");
   });
 
-  it("flips to discussing the moment the vote splits", () => {
-    expect(decisionStatus(decision({ d1: "yes", d2: "no" }), DIRECTORS, 2)).toBe("discussing");
+  it("flips to discussing as soon as two ballots differ", () => {
+    expect(
+      decisionStatus(decision({ d1: ["Hearts"], d2: ["Clubs"] }), DIRECTORS, 2),
+    ).toBe("discussing");
   });
 
-  it("splits even before everyone has voted", () => {
-    expect(decisionStatus(decision({ d1: "yes", d2: "no" }), [...DIRECTORS, "d4"], 2)).toBe(
-      "discussing",
-    );
+  it("treats Hearts against Hearts+Clubs as a discussion, not a narrower yes", () => {
+    expect(
+      decisionStatus(
+        decision({ d1: ["Hearts"], d2: ["Hearts"], d3: ["Hearts", "Clubs"] }),
+        DIRECTORS,
+        2,
+      ),
+    ).toBe("discussing");
   });
 
-  it("accepts only when every director has voted yes", () => {
-    expect(decisionStatus(decision({ d1: "yes", d2: "yes" }), DIRECTORS, 2)).toBe("in-review");
-    expect(decisionStatus(decision({ d1: "yes", d2: "yes", d3: "yes" }), DIRECTORS, 2)).toBe(
-      "accepted",
-    );
+  it("accepts when every director voted the same non-empty placement", () => {
+    expect(
+      decisionStatus(
+        decision({ d1: ["Hearts"], d2: ["Hearts"], d3: ["Hearts"] }),
+        DIRECTORS,
+        2,
+      ),
+    ).toBe("accepted");
   });
 
-  it("rejects on a unanimous no", () => {
-    expect(decisionStatus(decision({ d1: "no", d2: "no", d3: "no" }), DIRECTORS, 2)).toBe(
+  it("rejects when every director voted none", () => {
+    expect(decisionStatus(decision({ d1: [], d2: [], d3: [] }), DIRECTORS, 2)).toBe(
       "rejected",
     );
   });
 
   it("holds settlement while a [Need to discuss] is outstanding", () => {
     expect(
-      decisionStatus(decision({ d1: "yes", d2: "yes", d3: "hold" }), DIRECTORS, 2),
+      decisionStatus(
+        decision({ d1: ["Hearts"], d2: ["Hearts"], d3: "hold" }),
+        DIRECTORS,
+        2,
+      ),
     ).toBe("in-review");
   });
 
   it("respects the minimum-votes floor", () => {
-    expect(decisionStatus(decision({ d1: "yes" }), ["d1"], 2)).toBe("in-review");
-    expect(decisionStatus(decision({ d1: "yes" }), ["d1"], 1)).toBe("accepted");
+    expect(decisionStatus(decision({ d1: ["Hearts"] }), ["d1"], 2)).toBe("in-review");
+    expect(decisionStatus(decision({ d1: ["Hearts"] }), ["d1"], 1)).toBe("accepted");
   });
 
   it("cannot settle when the director roster is unknown", () => {
-    expect(decisionStatus(decision({ d1: "yes", d2: "yes" }), [], 2)).toBe("in-review");
+    expect(decisionStatus(decision({ d1: ["Hearts"], d2: ["Hearts"] }), [], 2)).toBe(
+      "in-review",
+    );
   });
 
-  it("lets a recorded final outcome override the tally", () => {
+  it("lets a recorded outcome override the tally", () => {
     const split = decision(
-      { d1: "yes", d2: "no" },
+      { d1: ["Hearts"], d2: [] },
       { final: { outcome: "yes", by: "d3", at: "2026-09-10T00:00:00Z" } },
     );
     expect(decisionStatus(split, DIRECTORS, 2)).toBe("accepted");
-
-    const flipped = { ...split, final: { outcome: "no" as const, by: "d3", at: "x" } };
-    expect(decisionStatus(flipped, DIRECTORS, 2)).toBe("rejected");
+    expect(
+      decisionStatus({ ...split, final: { outcome: "no", by: "d3", at: "x" } }, DIRECTORS, 2),
+    ).toBe("rejected");
   });
 });
 
@@ -137,37 +217,52 @@ describe("feedback", () => {
     const partial = decision({}, { feedback: { d1: { text: "", at: "x" } } });
     expect(feedbackProgress(partial, ["d1"]).complete).toBe(false);
   });
-
-  it("never completes when the roster is empty", () => {
-    expect(feedbackProgress(emptyDecision(), []).complete).toBe(false);
-  });
 });
 
 describe("renderDecision", () => {
-  it("shows the tally and who voted which way", () => {
-    const text = renderDecision(decision({ d1: "yes", d2: "hold" }), DIRECTORS, 2);
-    expect(text).toContain("Yes 1 · No 0 · Discuss 1");
-    expect(text).toContain("<@d1>");
+  it("shows per-subunit counts and how each director voted", () => {
+    const text = renderDecision(
+      decision({ d1: ["Hearts"], d2: ["Hearts", "Clubs"] }),
+      DIRECTORS,
+      2,
+    );
+    expect(text).toContain("Clubs 1");
+    expect(text).toContain("Hearts 2");
+    expect(text).toContain("<@d1> — Hearts");
   });
 
-  it("asks for a recorded outcome when the vote splits", () => {
-    const text = renderDecision(decision({ d1: "yes", d2: "no" }), DIRECTORS, 2);
+  it("names who hasn't voted yet", () => {
+    const text = renderDecision(decision({ d1: ["Hearts"] }), DIRECTORS, 2);
+    expect(text).toContain("<@d2> — *yet to vote*");
+  });
+
+  it("shows a vote for nobody as none", () => {
+    expect(renderDecision(decision({ d1: [] }), DIRECTORS, 2)).toContain("<@d1> — none");
+  });
+
+  it("states the agreed placement once they all match", () => {
+    const text = renderDecision(
+      decision({ d1: ["Hearts"], d2: ["Hearts"], d3: ["Hearts"] }),
+      DIRECTORS,
+      2,
+    );
+    expect(text).toContain("Agreed: Hearts");
+  });
+
+  it("asks for a recorded outcome when they disagree", () => {
+    const text = renderDecision(decision({ d1: ["Hearts"], d2: ["Clubs"] }), DIRECTORS, 2);
     expect(text).toContain("Discussing");
     expect(text).toContain("records the outcome");
   });
 
-  it("attributes a final outcome to whoever recorded it", () => {
+  it("attributes a decision made after discussion", () => {
     const text = renderDecision(
-      decision({ d1: "yes", d2: "no" }, { final: { outcome: "yes", by: "d3", at: "x" } }),
+      decision({ d1: ["Hearts"], d2: [] }, { final: { outcome: "yes", by: "d3", at: "x" } }),
       DIRECTORS,
       2,
     );
-    expect(text).toContain("Final: yes");
+    expect(text).toContain("Moving onto interview");
     expect(text).toContain("<@d3>");
-  });
-
-  it("says so when the roster isn't configured", () => {
-    expect(renderDecision(decision({ d1: "yes" }), [], 2)).toContain("director_ids");
   });
 });
 
@@ -194,13 +289,17 @@ describe("renderOutcomeLine", () => {
 
   it("drops the warning once it has actually gone", () => {
     const line = renderOutcomeLine({ outcome: "rejected", by: "d1", at, sentAt: at });
-    expect(line).toContain("notice sent");
+    expect(line).toContain("email sent");
     expect(line).not.toContain("not sent yet");
   });
 
-  it("covers every outcome", () => {
-    for (const outcome of ["welcomed", "rejected", "waitlisted"] as const) {
-      expect(renderOutcomeLine({ outcome, by: "d1", at })).toBeTruthy();
-    }
+  it("names the placement on an acceptance", () => {
+    const line = renderOutcomeLine({
+      outcome: "welcomed",
+      by: "d1",
+      at,
+      subunits: ["Hearts", "Clubs"],
+    });
+    expect(line).toContain("Hearts, Clubs");
   });
 });

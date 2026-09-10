@@ -1,4 +1,5 @@
 import type { Env } from "../env";
+import { matchChannel, type ChannelLike } from "./channelName";
 import type { MessagePayload } from "./types";
 
 const API = "https://discord.com/api/v10";
@@ -37,14 +38,12 @@ async function discordFetch(
   return res;
 }
 
-interface GuildChannel {
-  id: string;
-  name: string;
-}
-
 /**
  * Channel names live in config; IDs never do (design doc s2). Resolved lazily and
  * cached in KV, with `fresh` forcing a re-resolve after a 404.
+ *
+ * Matching ignores leading and trailing emoji and separators, so decorating a
+ * channel in Discord doesn't quietly break delivery - see channelName.ts.
  */
 export async function resolveChannelId(
   env: Env,
@@ -61,9 +60,8 @@ export async function resolveChannelId(
   const res = await discordFetch(env, `/guilds/${guildId}/channels`);
   if (!res.ok) throw new DiscordError(res.status, await res.text());
 
-  const channels = (await res.json()) as GuildChannel[];
-  const match = channels.find((c) => c.name === name);
-  if (!match) throw new Error(`no channel named #${name} in guild ${guildId}`);
+  const match = matchChannel((await res.json()) as ChannelLike[], name);
+  if (!match.ok) throw new Error(`${match.reason} in guild ${guildId}`);
 
   await env.KV.put(cacheKey, match.id, { expirationTtl: CHANNEL_CACHE_TTL });
   return match.id;
@@ -116,6 +114,38 @@ export async function editMessage(
 }
 
 /**
+ * Creates a fresh invite for one named person.
+ *
+ * Single-use and time-limited on purpose. The acceptance email says "7 days or
+ * you forfeit your spot", and this is what makes that true rather than a polite
+ * request: miss the window and the link is dead, and it can't be forwarded to
+ * someone else in the meantime.
+ *
+ * A fixed link in config can do neither, which is why minting is the default.
+ *
+ * Needs CREATE_INSTANT_INVITE on the target channel.
+ */
+export async function createInvite(
+  env: Env,
+  channelId: string,
+  maxAgeSeconds: number,
+): Promise<string> {
+  const res = await discordFetch(env, `/channels/${channelId}/invites`, {
+    method: "POST",
+    body: JSON.stringify({
+      max_age: Math.floor(maxAgeSeconds),
+      max_uses: 1,
+      unique: true,
+      temporary: false,
+    }),
+  });
+  if (!res.ok) throw new DiscordError(res.status, await res.text());
+
+  const invite = (await res.json()) as { code: string };
+  return `https://discord.gg/${invite.code}`;
+}
+
+/**
  * Fail loudly (design doc s6.2). Never throws - an alert that throws hides the
  * original failure.
  */
@@ -123,7 +153,7 @@ export async function alertDirectors(env: Env, content: string): Promise<void> {
   try {
     await postToChannelByName(
       env,
-      env.GUILD_DANCE_ID,
+      env.GUILD_COMMUNITY_ID,
       env.CH_DIRECTORS_CONFIRMATION,
       { content, allowed_mentions: { parse: [] } },
     );

@@ -17,7 +17,12 @@ export const InteractionResponseType = {
 
 export const MessageFlags = { EPHEMERAL: 1 << 6 } as const;
 
-export const ComponentType = { ACTION_ROW: 1, BUTTON: 2, TEXT_INPUT: 4 } as const;
+export const ComponentType = {
+  ACTION_ROW: 1,
+  BUTTON: 2,
+  STRING_SELECT: 3,
+  TEXT_INPUT: 4,
+} as const;
 
 export const TextInputStyle = { SHORT: 1, PARAGRAPH: 2 } as const;
 
@@ -48,6 +53,8 @@ export interface Interaction {
     component_type?: number;
     name?: string;
     options?: InteractionOption[];
+    /** String-select submissions: the chosen option values. */
+    values?: string[];
     /** Modal submissions: action rows wrapping the text inputs. */
     components?: { components?: { custom_id?: string; value?: string }[] }[];
   };

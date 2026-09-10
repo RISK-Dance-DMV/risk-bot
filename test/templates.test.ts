@@ -110,3 +110,52 @@ describe("missingTemplates", () => {
     expect(missing).toHaveLength(EXPECTED_TEMPLATE_KEYS.length - 1);
   });
 });
+
+describe("loose matching (real sheets don't follow one convention)", () => {
+  const templates: Template[] = [
+    { key: "interview_invitation", subject: "s", body: "b" },
+    { key: "rejection_with_feedback", subject: "s", body: "b" },
+  ];
+
+  it("matches an underscored key against a spaced one", () => {
+    expect(findTemplate(templates, "interview invitation")?.key).toBe("interview_invitation");
+    expect(findTemplate(templates, "rejection with feedback")?.key).toBe(
+      "rejection_with_feedback",
+    );
+  });
+
+  it("fills an uppercase merge field from a lowercase value", () => {
+    const result = renderTemplate(
+      { key: "k", subject: "Hi {{NAME}}", body: "See you {{SLOT}}" },
+      { name: "Mimi", slot: "Sunday" },
+    );
+    expect(result).toMatchObject({ ok: true, subject: "Hi Mimi", body: "See you Sunday" });
+  });
+});
+
+describe("merge fields that a narrow pattern would miss", () => {
+  it("catches fields containing spaces, commas and parentheses", () => {
+    expect(mergeFieldsIn("{{DATE, TIME}} {{SUBUNIT(s)}} {{DISCORD INVITE}}")).toEqual([
+      "DATE, TIME",
+      "SUBUNIT(s)",
+      "DISCORD INVITE",
+    ]);
+  });
+
+  it("refuses to send a template containing them rather than mailing them literally", () => {
+    const result = renderTemplate(
+      { key: "interview invitation", subject: "s", body: "does {{DATE, TIME}} work?" },
+      { name: "Mimi" },
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toContain("{{DATE, TIME}}");
+  });
+
+  it("still renders a template whose fields are all supplied", () => {
+    const result = renderTemplate(
+      { key: "k", subject: "s", body: "does {{DATE, TIME}} work?" },
+      { "date, time": "Sunday 2pm" },
+    );
+    expect(result).toMatchObject({ ok: true, body: "does Sunday 2pm work?" });
+  });
+});

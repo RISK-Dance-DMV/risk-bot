@@ -9,7 +9,9 @@ import type { Env } from "../env";
 export type SettingKey =
   | "application_audition_days"
   | "decision_min_votes"
-  | "draft_reping_hours";
+  | "draft_reping_hours"
+  | "waitlist_revisit_days"
+  | "invite_days";
 
 const DEFAULTS: Record<SettingKey, number> = {
   /** Days a "RISK audition process" card waits for a submission before closing. */
@@ -18,6 +20,13 @@ const DEFAULTS: Record<SettingKey, number> = {
   decision_min_votes: 2,
   /** "A draft unactioned 48h before the date it references re-pings." */
   draft_reping_hours: 48,
+  /** How long a waitlisted applicant sits before resurfacing for another look. */
+  waitlist_revisit_days: 30,
+  /**
+   * Invite lifetime, matching the deadline the acceptance email states. The link
+   * expiring IS the deadline, rather than a second thing anyone has to enforce.
+   */
+  invite_days: 7,
 };
 
 export async function getNumber(env: Env, key: SettingKey): Promise<number> {

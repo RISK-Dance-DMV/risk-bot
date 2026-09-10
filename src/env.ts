@@ -5,6 +5,15 @@ export interface Env {
   GUILD_COMMUNITY_NAME: string;
   CH_AUDITION_REVIEW: string;
   CH_DIRECTORS_CONFIRMATION: string;
+  /** Channels new members are invited into, one per guild. */
+  CH_COMMUNITY_INVITE: string;
+  CH_DANCE_INVITE: string;
+  /**
+   * Fixed invite links, used instead of minting. Only needed for a guild the bot
+   * isn't in yet - it can't create an invite to a server it hasn't joined.
+   */
+  COMMUNITY_INVITE_URL?: string;
+  DANCE_INVITE_URL?: string;
 
   // secrets / ids
   DISCORD_PUBLIC_KEY: string;

@@ -10,8 +10,8 @@ import { PINNED } from "../config/columns";
 import { isEnabled } from "../config/flags";
 import { alertDirectors } from "../discord/rest";
 import type { Env } from "../env";
-import { cell } from "./fields";
-import { getRecord, headersOk, setCardState } from "./intake";
+import { cell, parseRow } from "./fields";
+import { announceOnCard, getRecord, headersOk, setCardState } from "./intake";
 
 const SEEN_TTL = 400 * 24 * 60 * 60;
 const MAX_ROWS = 500;
@@ -86,7 +86,19 @@ async function processRow(
   if (!sheetRow) return result("no_card");
 
   const wasClosed = record.state === "closed";
-  await setCardState(env, record, "submitted", sheetRow);
+  const updated = await setCardState(env, record, "submitted", sheetRow);
+
+  // The card flipping to `submitted` is the moment there's something to vote on,
+  // and an edit notifies nobody.
+  const name = parseRow(applicationRow, sheetRow.values).name || `row ${applicationRow}`;
+  await announceOnCard(
+    env,
+    updated,
+    wasClosed
+      ? `**${name}**'s audition arrived after their card had closed — reopened, and ready to vote on.`
+      : `**${name}**'s audition arrived. Ready to vote on.`,
+  );
+
   return result(wasClosed ? "matched_late" : "matched");
 }
 

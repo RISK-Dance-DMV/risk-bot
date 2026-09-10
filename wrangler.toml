@@ -3,29 +3,60 @@ main = "src/index.ts"
 compatibility_date = "2025-06-01"
 
 # Channel *names*, never IDs (design doc §2) - resolved at job start, re-resolved on 404.
+#
+# Both of these are resolved in the COMMUNITY guild. The doc lists
+# #directors-bot-confirmation as a dance channel, but everything built so far runs
+# in community, so it needs to exist there - or point this at whichever community
+# channel should receive failure alerts.
 [vars]
 GUILD_COMMUNITY_NAME = "RISK Community"
 CH_AUDITION_REVIEW = "audition-review"
 CH_DIRECTORS_CONFIRMATION = "directors-bot-confirmation"
 
+# Acceptance invites.
+#
+# A fixed URL wins where set, and minting is skipped entirely - so the bot needs
+# no CREATE_INSTANT_INVITE, and CH_*_INVITE below go unused. Deliberate: access is
+# gated by role, not by joining, so an unwanted joiner sees nothing and gets
+# kicked. Keep these non-expiring, unlimited-use links.
+#
+# ⚠️ Both of these appeared in a chat transcript. Rotate them in Server Settings →
+# Invites and paste the replacements here.
+COMMUNITY_INVITE_URL = "https://discord.gg/tNQpc8YseB"
+DANCE_INVITE_URL = "https://discord.gg/6DVVkcB76A"
+
+# Only used if the matching *_INVITE_URL above is removed, in which case the bot
+# mints a single-use link expiring after config:invite_days.
+CH_COMMUNITY_INVITE = "general"
+CH_DANCE_INVITE = "general"
+
 # Application response sheet. The gid is read from this URL, so paste the link
 # with the responses tab selected. Not a credential - Google controls access.
 APPLICATION_SHEET_URL = "https://docs.google.com/spreadsheets/d/1sVrn-TsQhlTfiQ1s7KIONEkAmMgx4BbJMGMURK4t8G8/edit?gid=279287741#gid=279287741"
 
-# Guild IDs are IDs by necessity; fill in via `wrangler secret` or here.
-# GUILD_COMMUNITY_ID = "..."
-# GUILD_DANCE_ID = "..."
+# Discord IDs. NOT secrets - a guild id is visible to every member, and an
+# application id is public. They live here so `npm run register` can read them
+# without you handing it anything sensitive.
+#
+# If you already ran `wrangler secret put` for any of these, delete that secret
+# (`npx wrangler secret delete <NAME>`) or it will shadow the value below.
+DISCORD_APPLICATION_ID = "955257751083294791"
+GUILD_COMMUNITY_ID = "1018688498993221712"
+GUILD_DANCE_ID = "1364421949807399034"
+
+# Community-guild director role. Everything built so far runs in the community
+# guild, so this is the role the /form register handler checks.
+ROLE_DIRECTOR_ID = "1018859268444803152"
 
 [[kv_namespaces]]
 binding = "KV"
 id = "ded6bd9a990747d58a035672dcf05783"
 preview_id = "d2d8406da4054a07977b35f94830edf1"
 
-# Secrets (wrangler secret put <NAME>):
+# Real secrets (npx wrangler secret put <NAME>). Write-only once set - nothing
+# local can read them back, which is why `npm run register` uses .dev.vars.
 #   DISCORD_PUBLIC_KEY   - for interaction signature verification
 #   DISCORD_BOT_TOKEN    - REST calls
-#   DISCORD_APPLICATION_ID - for slash command registration
-#   ROLE_DIRECTOR_ID     - layer-3 gating on /form register
 #   APPS_SCRIPT_URL      - deployed web app /exec URL
 #   APPS_SCRIPT_SECRET   - Worker -> Apps Script
 #   INBOUND_SECRET       - Apps Script notifier + Actions cron -> Worker

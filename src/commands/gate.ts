@@ -14,8 +14,8 @@ export async function declineReason(
   interaction: Interaction,
   channelName: string,
 ): Promise<string | null> {
-  if (interaction.guild_id !== env.GUILD_DANCE_ID) {
-    return "That command only works in the dance server.";
+  if (interaction.guild_id !== env.GUILD_COMMUNITY_ID) {
+    return "That command only works in the community server.";
   }
 
   const roles = interaction.member?.roles ?? [];
@@ -28,7 +28,7 @@ export async function declineReason(
 
   let allowed: string;
   try {
-    allowed = await resolveChannelId(env, env.GUILD_DANCE_ID, channelName);
+    allowed = await resolveChannelId(env, env.GUILD_COMMUNITY_ID, channelName);
   } catch (err) {
     return `Couldn't resolve #${channelName}: ${err instanceof Error ? err.message : String(err)}`;
   }
