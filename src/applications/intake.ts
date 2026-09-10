@@ -7,8 +7,9 @@ import { alertDirectors, editMessage, postToChannelByName } from "../discord/res
 import type { MessagePayload } from "../discord/types";
 import type { Env } from "../env";
 import { buildIntakeMessage, type CardState } from "./card";
-import { emptyDecision, type Decision } from "./decision";
+import { emptyDecision, type Decision, type OutcomeRecord } from "./decision";
 import { parseRow, verifyPinnedHeaders, type ApplicationRow } from "./fields";
+import type { InterviewRecord } from "./interviewSlot";
 import { buildSheetRowUrl } from "./sheetLink";
 import { collectVideoGroups, type VideoGroup } from "./videos";
 
@@ -37,6 +38,8 @@ export interface CardRecord {
   values?: string[];
   videos?: VideoGroup[];
   decision?: Decision;
+  interview?: InterviewRecord;
+  outcome?: OutcomeRecord;
 }
 
 export const CARDED_PREFIX = "app:carded:";
@@ -99,6 +102,8 @@ export async function renderCard(
   waitingSince: Date,
   videos: VideoGroup[],
   decision: Decision,
+  interview?: InterviewRecord,
+  outcome?: OutcomeRecord,
 ): Promise<MessagePayload> {
   const [directorIds, minVotes] = await Promise.all([
     getDirectorIds(env),
@@ -113,6 +118,8 @@ export async function renderCard(
     decision,
     directorIds,
     minVotes,
+    interview,
+    outcome,
   });
 }
 
@@ -173,7 +180,16 @@ export async function setCardState(
     env,
     record.channelId,
     record.messageId,
-    await renderCard(env, row, state, waitingSince, videos, decision),
+    await renderCard(
+      env,
+      row,
+      state,
+      waitingSince,
+      videos,
+      decision,
+      record.interview,
+      record.outcome,
+    ),
   );
 
   const updated: CardRecord = {
@@ -210,6 +226,8 @@ export async function refreshCard(env: Env, record: CardRecord): Promise<void> {
       new Date(record.waitingSince),
       record.videos ?? [],
       record.decision ?? emptyDecision(),
+      record.interview,
+      record.outcome,
     ),
   );
 }

@@ -4,6 +4,7 @@
 import { audit } from "../audit";
 import { getNumber } from "../config/settings";
 import { deliverEmail } from "../email/service";
+import { dispatchPublished } from "./hooks";
 import { editMessage, postToChannelByName } from "../discord/rest";
 import type { Env } from "../env";
 import {
@@ -185,6 +186,7 @@ async function publish(
     actedAt: new Date().toISOString(),
   };
   await settle(env, settled);
+  await dispatchPublished(env, settled);
   await audit(env, {
     action: publishedAs === "edited" ? "draft.edited" : "draft.approved",
     actor,

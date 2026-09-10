@@ -28,10 +28,9 @@ export const FORM_COMMAND = {
           name: "type",
           description: "Which form this is",
           required: true,
-          choices: [
-            { name: "application", value: "application" },
-            { name: "audition", value: "audition" },
-          ],
+          // The application sheet is addressed by URL in Apps Script rather than
+          // registered, because that form doesn't rotate. Audition forms do.
+          choices: [{ name: "audition", value: "audition" }],
         },
         {
           type: ApplicationCommandOptionType.STRING,

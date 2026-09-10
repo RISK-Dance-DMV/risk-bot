@@ -191,6 +191,57 @@ export function renderDecision(
   return lines.join("\n");
 }
 
+// ------------------------------------------------------------- the outcome
+
+/**
+ * The terminal decision, reachable two ways (doc open question 3, answered yes):
+ * directly once the vote is unanimous, or after an interview.
+ */
+export type ApplicationOutcome = "welcomed" | "rejected" | "waitlisted";
+
+export interface OutcomeRecord {
+  outcome: ApplicationOutcome;
+  by: string;
+  at: string;
+  /** The draft carrying the email, until it is approved. */
+  draftId?: string;
+  sentAt?: string;
+}
+
+export const OUTCOME_LABEL: Record<ApplicationOutcome, string> = {
+  welcomed: "WELCOME TO RISK",
+  rejected: "Reject from RISK",
+  waitlisted: "Waitlist",
+};
+
+/** Which of the doc's s27 templates a given outcome uses. */
+export function outcomeTemplateKey(
+  outcome: ApplicationOutcome,
+  wantsFeedback: boolean,
+): string {
+  if (outcome === "welcomed") return "acceptance";
+  if (outcome === "waitlisted") return "waitlist notice";
+  return wantsFeedback ? "rejection with feedback" : "rejection without feedback";
+}
+
+export function renderOutcomeLine(record: OutcomeRecord): string {
+  const who = mention(record.by);
+  switch (record.outcome) {
+    case "welcomed":
+      return record.sentAt
+        ? `🎉 **Welcomed into RISK** — acceptance sent, recorded by ${who}.`
+        : `🎉 **Welcomed into RISK** by ${who} — ⚠️ acceptance drafted, not sent yet.`;
+    case "rejected":
+      return record.sentAt
+        ? `🚫 **Rejected** — notice sent, recorded by ${who}.`
+        : `🚫 **Rejected** by ${who} — ⚠️ notice drafted, not sent yet.`;
+    case "waitlisted":
+      return record.sentAt
+        ? `⏸️ **Waitlisted** — notice sent, recorded by ${who}.`
+        : `⏸️ **Waitlisted** by ${who} — ⚠️ notice drafted, not sent yet.`;
+  }
+}
+
 export interface FeedbackField {
   name: string;
   value: string;

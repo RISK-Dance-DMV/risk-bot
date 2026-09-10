@@ -82,6 +82,15 @@ export interface ApplicationRow {
   values: readonly string[];
 }
 
+/**
+ * Whether the applicant asked for feedback, which picks between the two
+ * rejection templates. Anything that isn't a clear yes counts as no — the
+ * quieter template is the safer one to pick wrongly.
+ */
+export function wantsFeedback(answer: string): boolean {
+  return /\byes\b/i.test(answer.trim());
+}
+
 export function parseRow(row: number, values: readonly string[]): ApplicationRow {
   const auditionMethodRaw = cell(values, AUDITION_METHOD_COLUMN);
   return {

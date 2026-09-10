@@ -12,13 +12,17 @@ import {
   decisionStatus,
   feedbackFields,
   hasSplit,
-  isSettled,
+  OUTCOME_LABEL,
   renderDecision,
+  renderOutcomeLine,
+  type ApplicationOutcome,
   type Decision,
   type DecisionStatus,
+  type OutcomeRecord,
 } from "./decision";
 import { cell } from "./fields";
 import type { ApplicationRow } from "./fields";
+import { renderInterviewLine, type InterviewRecord } from "./interviewSlot";
 import { escapeMd, truncate } from "./text";
 import { countLinks, type VideoGroup } from "./videos";
 
@@ -64,7 +68,16 @@ export type CardAction =
   | "final-yes"
   | "final-no"
   | "feedback"
-  | "feedback-save";
+  | "feedback-save"
+  | "interview"
+  | "interview-confirm"
+  | "interview-confirm-save"
+  | "interview-save"
+  | "outcome-welcome"
+  | "outcome-reject"
+  | "outcome-waitlist"
+  | "reply"
+  | "reply-save";
 
 const ACTIONS: CardAction[] = [
   "open",
@@ -76,6 +89,15 @@ const ACTIONS: CardAction[] = [
   "final-no",
   "feedback",
   "feedback-save",
+  "interview",
+  "interview-confirm",
+  "interview-confirm-save",
+  "interview-save",
+  "outcome-welcome",
+  "outcome-reject",
+  "outcome-waitlist",
+  "reply",
+  "reply-save",
 ];
 
 /** Persistent custom_id - the interaction token expires in ~15 min, this does not. */
@@ -95,8 +117,8 @@ export function parseCustomId(
   return { action, row };
 }
 
-/** Decision actions are the ones gated on the director roster. */
-export function isDecisionAction(action: CardAction): boolean {
+/** Actions gated on the director roster. */
+export function isDirectorAction(action: CardAction): boolean {
   return [
     "yes",
     "no",
@@ -105,6 +127,15 @@ export function isDecisionAction(action: CardAction): boolean {
     "final-no",
     "feedback",
     "feedback-save",
+    "interview",
+    "interview-confirm",
+    "interview-confirm-save",
+    "interview-save",
+    "outcome-welcome",
+    "outcome-reject",
+    "outcome-waitlist",
+    "reply",
+    "reply-save",
   ].includes(action);
 }
 
@@ -196,15 +227,44 @@ export interface CardOptions {
   decision?: Decision;
   directorIds?: readonly string[];
   minVotes?: number;
+  interview?: InterviewRecord;
+  outcome?: OutcomeRecord;
 }
 
-/** Videographer/editor and other non-dancer roles. */
-export function buildOneLiner(row: ApplicationRow): MessagePayload {
+/**
+ * Videographer/editor and other non-dancer roles.
+ *
+ * Deliberately a dead end: no votes, no interview, no statuses. The card says so
+ * out loud, so nobody goes hunting for a workflow that was never built.
+ */
+export function buildOneLiner(row: ApplicationRow, sheetUrl?: string): MessagePayload {
   const type = row.applicantType || "unspecified";
   const name = row.name || `(no name, row ${row.row})`;
+
+  const buttons: Button[] = [
+    {
+      type: ComponentType.BUTTON,
+      style: ButtonStyle.PRIMARY,
+      label: "Draft a reply",
+      custom_id: customId("reply", row.row),
+    },
+  ];
+  if (sheetUrl) {
+    buttons.push({
+      type: ComponentType.BUTTON,
+      style: ButtonStyle.LINK,
+      label: "Sheet row",
+      url: sheetUrl,
+    });
+  }
+
   return {
-    content: `\u{1F4F9} **${escapeMd(name)}** ${DASH} ${escapeMd(type)} · row ${row.row}`,
+    content: [
+      `\u{1F4F9} **${escapeMd(name)}** ${DASH} ${escapeMd(type)} · row ${row.row}`,
+      "_Reply and that's it — no review, no interview._",
+    ].join("\n"),
     allowed_mentions: { parse: [] },
+    components: [{ type: ComponentType.ACTION_ROW, components: buttons }],
   };
 }
 
@@ -282,22 +342,84 @@ function finalRow(row: number, decision: Decision): Button[] {
 }
 
 /**
- * The doc's terminal step: "Unanimous Yes unlocks [Send acceptance]."
+ * The terminal step, reachable two ways: directly once the vote is unanimous, or
+ * after an interview. Both land on the same three buttons, so an application ends
+ * in one place rather than two competing ones.
  *
- * Rendered locked. Actually sending is rank 27 (email), which is not built - so
- * the card shows the gate was reached without pretending it can act on it.
+ * They stay visible after an outcome is recorded, so a misclick is corrected by
+ * pressing another — same idea as [Final Yes] / [Final No].
  */
-function sendRow(status: DecisionStatus, emailSendsEnabled: boolean): Button[] {
-  if (!isSettled(status)) return [];
-  return [
-    {
+function outcomeRow(
+  row: number,
+  status: DecisionStatus,
+  interview?: InterviewRecord,
+  outcome?: OutcomeRecord,
+): Button[] {
+  const reachable =
+    !!outcome ||
+    status === "accepted" ||
+    status === "rejected" ||
+    interview?.state === "scheduled";
+  if (!reachable) return [];
+
+  // A unanimous no shouldn't put a welcome button under someone's thumb.
+  const available: ApplicationOutcome[] =
+    status === "rejected" && !outcome && interview?.state !== "scheduled"
+      ? ["rejected", "waitlisted"]
+      : ["welcomed", "rejected", "waitlisted"];
+
+  const chosenStyle: Record<ApplicationOutcome, number> = {
+    welcomed: ButtonStyle.SUCCESS,
+    rejected: ButtonStyle.DANGER,
+    waitlisted: ButtonStyle.PRIMARY,
+  };
+  const action: Record<ApplicationOutcome, CardAction> = {
+    welcomed: "outcome-welcome",
+    rejected: "outcome-reject",
+    waitlisted: "outcome-waitlist",
+  };
+
+  return available.map((value) => ({
+    type: ComponentType.BUTTON,
+    style: outcome?.outcome === value ? chosenStyle[value] : ButtonStyle.SECONDARY,
+    label: OUTCOME_LABEL[value],
+    custom_id: customId(action[value], row),
+  }));
+}
+
+/**
+ * [Interview] drafts or redrafts the invitation; [Interview Confirmed] appears
+ * only once one has actually gone out, since there is nothing to confirm before
+ * then.
+ */
+function interviewRow(
+  row: number,
+  status: DecisionStatus,
+  interview?: InterviewRecord,
+  outcome?: OutcomeRecord,
+): Button[] {
+  // Interviews are for applicants the directors agreed to interview. A rejected,
+  // undecided, or already-finished card offers nothing here.
+  if (status !== "accepted" || outcome) return [];
+
+  const buttons: Button[] = [];
+  if (interview?.state !== "scheduled") {
+    buttons.push({
       type: ComponentType.BUTTON,
-      style: status === "accepted" ? ButtonStyle.SUCCESS : ButtonStyle.SECONDARY,
-      label: status === "accepted" ? "Send acceptance" : "Send rejection",
-      custom_id: `app|send-${status}|0`,
-      disabled: !emailSendsEnabled,
-    },
-  ];
+      style: ButtonStyle.SECONDARY,
+      label: interview ? "Redraft interview" : "Interview",
+      custom_id: customId("interview", row),
+    });
+  }
+  if (interview?.state === "offered") {
+    buttons.push({
+      type: ComponentType.BUTTON,
+      style: ButtonStyle.SUCCESS,
+      label: "Interview Confirmed",
+      custom_id: customId("interview-confirm", row),
+    });
+  }
+  return buttons;
 }
 
 export function buildDancerCard(row: ApplicationRow, opts: CardOptions): MessagePayload {
@@ -326,6 +448,8 @@ export function buildDancerCard(row: ApplicationRow, opts: CardOptions): Message
     : "new";
 
   const blocks: string[] = [renderMethodAndVideos(row, opts.state, opts.videos, opts.dueAt)];
+  if (opts.interview && decidable) blocks.push(renderInterviewLine(opts.interview));
+  if (opts.outcome) blocks.push(renderOutcomeLine(opts.outcome));
   if (decision && decidable) {
     blocks.push(renderDecision(decision, directorIds, minVotes));
     fields.push(...feedbackFields(decision, directorIds));
@@ -341,6 +465,13 @@ export function buildDancerCard(row: ApplicationRow, opts: CardOptions): Message
     rows.push(decisionRow(row.row, decision));
     const final = finalRow(row.row, decision);
     if (final.length > 0) rows.push(final);
+  }
+  if (decidable) {
+    const interview = interviewRow(row.row, status, opts.interview, opts.outcome);
+    if (interview.length > 0) rows.push(interview);
+
+    const outcome = outcomeRow(row.row, status, opts.interview, opts.outcome);
+    if (outcome.length > 0) rows.push(outcome);
   }
 
   const utility: Button[] = [];
@@ -368,10 +499,11 @@ export function buildDancerCard(row: ApplicationRow, opts: CardOptions): Message
   }
   rows.push(utility);
 
-  const send = decidable ? sendRow(status, false) : [];
-  if (send.length > 0) rows.push(send);
-
-  const footerStatus = decidable ? `${opts.state} · ${status}` : opts.state;
+  const interviewStatus = opts.interview ? ` · interview-${opts.interview.state}` : "";
+  const outcomeStatus = opts.outcome ? ` · ${opts.outcome.outcome}` : "";
+  const footerStatus = decidable
+    ? `${opts.state} · ${status}${interviewStatus}${outcomeStatus}`
+    : opts.state;
 
   return {
     embeds: [
@@ -385,7 +517,9 @@ export function buildDancerCard(row: ApplicationRow, opts: CardOptions): Message
         },
       },
     ],
-    components: rows.map((components) => ({
+    // Discord allows five action rows; decision + final + interview + outcome
+    // + utility is exactly five in the worst case.
+    components: rows.slice(0, 5).map((components) => ({
       type: ComponentType.ACTION_ROW,
       components,
     })),
@@ -406,7 +540,7 @@ export function buildIntakeMessage(
   if (isDancer(row.applicantType)) return buildDancerCard(row, opts);
 
   const known = /videograph|editor|photograph|media/i.test(row.applicantType);
-  if (known) return buildOneLiner(row);
+  if (known) return buildOneLiner(row, opts.sheetUrl);
 
   return buildDancerCard(row, {
     ...opts,

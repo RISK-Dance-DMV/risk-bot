@@ -6,7 +6,9 @@ import {
   feedbackProgress,
   hasSplit,
   isSettled,
+  outcomeTemplateKey,
   renderDecision,
+  renderOutcomeLine,
   tally,
   type Ballot,
   type Decision,
@@ -166,5 +168,39 @@ describe("renderDecision", () => {
 
   it("says so when the roster isn't configured", () => {
     expect(renderDecision(decision({ d1: "yes" }), [], 2)).toContain("director_ids");
+  });
+});
+
+describe("outcomeTemplateKey", () => {
+  it("picks the acceptance and waitlist templates", () => {
+    expect(outcomeTemplateKey("welcomed", false)).toBe("acceptance");
+    expect(outcomeTemplateKey("waitlisted", true)).toBe("waitlist notice");
+  });
+
+  it("picks the rejection template that matches what they asked for", () => {
+    expect(outcomeTemplateKey("rejected", true)).toBe("rejection with feedback");
+    expect(outcomeTemplateKey("rejected", false)).toBe("rejection without feedback");
+  });
+});
+
+describe("renderOutcomeLine", () => {
+  const at = "2026-09-10T00:00:00Z";
+
+  it("flags an outcome whose email is drafted but unsent", () => {
+    const line = renderOutcomeLine({ outcome: "welcomed", by: "d1", at });
+    expect(line).toContain("not sent yet");
+    expect(line).toContain("<@d1>");
+  });
+
+  it("drops the warning once it has actually gone", () => {
+    const line = renderOutcomeLine({ outcome: "rejected", by: "d1", at, sentAt: at });
+    expect(line).toContain("notice sent");
+    expect(line).not.toContain("not sent yet");
+  });
+
+  it("covers every outcome", () => {
+    for (const outcome of ["welcomed", "rejected", "waitlisted"] as const) {
+      expect(renderOutcomeLine({ outcome, by: "d1", at })).toBeTruthy();
+    }
   });
 });

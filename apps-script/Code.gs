@@ -6,15 +6,18 @@
  * verifies the shared secret BEFORE doing anything else.
  *
  * Script properties (File > Project settings > Script properties):
- *   APPS_SCRIPT_SECRET   - long random string; Worker -> here
- *   INBOUND_SECRET       - long random string; here -> Worker
- *   WORKER_URL           - https://risk-bot.<subdomain>.workers.dev
- *   TEMPLATES_SHEET_ID   - spreadsheet holding the email templates
- *   TEMPLATES_SHEET_NAME - its tab name (default "Templates")
+ *   APPS_SCRIPT_SECRET    - long random string; Worker -> here
+ *   INBOUND_SECRET        - long random string; here -> Worker
+ *   WORKER_URL            - https://risk-bot.<subdomain>.workers.dev
+ *   APPLICATION_SHEET_URL - the application responses, tab picked by its gid
+ *   TEMPLATES_SHEET_ID    - spreadsheet holding the email templates
+ *   TEMPLATES_SHEET_NAME  - its tab name (default "Templates")
+ *   INTERVIEW_CALENDAR_ID - optional; defaults to the RISK account's own calendar
  *
- * Form registration writes these itself; don't set them by hand:
- *   forms.application, forms.audition                  (current registration)
- *   forms.application.history, forms.audition.history   (previous forms)
+ * The application form is addressed by that URL and wired up by running
+ * installApplicationTrigger() once. The audition form rotates twice a year, so it
+ * goes through /form register instead, which writes these - don't set them by hand:
+ *   forms.audition, forms.audition.history
  */
 
 var MAX_ROWS = 500;
@@ -87,7 +90,41 @@ function findResponseSheet_(spreadsheet, formId) {
   return null;
 }
 
+/**
+ * The application responses, addressed by sheet URL rather than by registering
+ * the form.
+ *
+ * The application form doesn't rotate the way the audition form does, so opening
+ * it, proving RISK owns it and tracking its history buys nothing. The tab comes
+ * from the gid in the URL, so pasting the link with the responses tab selected is
+ * the whole configuration.
+ */
+function applicationSheet_() {
+  var url = props_().getProperty("APPLICATION_SHEET_URL");
+  if (!url) {
+    fail_(
+      "APPLICATION_SHEET_URL script property is not set — paste the response sheet's URL with the responses tab selected"
+    );
+  }
+
+  var idMatch = url.match(/\/spreadsheets\/d\/([\w-]+)/);
+  if (!idMatch) fail_("APPLICATION_SHEET_URL doesn't look like a Google Sheets URL");
+
+  var ss = SpreadsheetApp.openById(idMatch[1]);
+  var gidMatch = url.match(/[?#&]gid=(\d+)/);
+  if (!gidMatch) return ss.getSheets()[0];
+
+  var gid = Number(gidMatch[1]);
+  var sheets = ss.getSheets();
+  for (var i = 0; i < sheets.length; i++) {
+    if (sheets[i].getSheetId() === gid) return sheets[i];
+  }
+  fail_("no tab with gid " + gid + ' in "' + ss.getName() + '"');
+}
+
 function sheetForType_(type) {
+  if (type === "application") return applicationSheet_();
+
   var cfg = getFormConfig_(type);
   if (!cfg) fail_("no " + type + " form registered — run /form register first");
   var ss = SpreadsheetApp.openById(cfg.destinationId);
@@ -132,6 +169,8 @@ function doPost(e) {
         return reply_({ ok: true, data: readTemplates_() });
       case "sendEmail":
         return reply_({ ok: true, data: sendEmail_(params) });
+      case "createInterviewEvent":
+        return reply_({ ok: true, data: createInterviewEvent_(params) });
       default:
         return reply_({ ok: false, error: "unknown action: " + body.action });
     }
@@ -258,6 +297,11 @@ function commitForm_(params) {
   var type = String(params.type || "");
   var handler = HANDLERS[type];
   if (!handler) fail_("unknown form type: " + type);
+  if (type === "application") {
+    fail_(
+      "the application sheet is configured by the APPLICATION_SHEET_URL script property, not by registering the form — run installApplicationTrigger() once after setting it"
+    );
+  }
   if (!params.formId || !params.destinationId || !params.sheetName) {
     fail_("commitForm needs formId, destinationId and sheetName");
   }
@@ -305,6 +349,32 @@ function installTrigger_(handler, destinationId) {
   ScriptApp.newTrigger(handler).forSpreadsheet(ss).onFormSubmit().create();
 }
 
+/**
+ * Run once from the Apps Script editor after setting APPLICATION_SHEET_URL.
+ *
+ * Reports the tab and the C/D/E headers it found so they can be eyeballed here,
+ * rather than discovered when the first real application silently reads pronouns
+ * as names. The Worker re-checks them at the start of every job regardless.
+ */
+function installApplicationTrigger() {
+  var sheet = applicationSheet_();
+  var lastCol = sheet.getLastColumn();
+  var headers = lastCol > 0 ? sheet.getRange(1, 1, 1, lastCol).getDisplayValues()[0] : [];
+
+  installTrigger_(HANDLERS.application, sheet.getParent().getId());
+
+  var summary = {
+    spreadsheet: sheet.getParent().getName(),
+    tab: sheet.getName(),
+    responses: Math.max(0, sheet.getLastRow() - 1),
+    C_email: headers[2] || "(empty)",
+    D_applicantType: headers[3] || "(empty)",
+    E_name: headers[4] || "(empty)",
+  };
+  console.log("application intake wired up: " + JSON.stringify(summary, null, 2));
+  return summary;
+}
+
 // ----------------------------------------------------------- form notifiers
 
 /**
@@ -336,17 +406,24 @@ function notifyWorker_(path, payload) {
 }
 
 /**
- * Both handlers guard on the tab name: two forms can land in one spreadsheet, and
- * a spreadsheet trigger fires for every form feeding it.
+ * Both handlers guard on the tab: two forms can land in one spreadsheet, and a
+ * spreadsheet trigger fires for every form feeding it. Compared by sheet id
+ * rather than name, so renaming the tab doesn't silently stop intake.
  */
 function handleSubmit_(type, e) {
   if (!e || !e.range) {
     console.error(type + " submit fired without a range");
     return;
   }
-  var cfg = getFormConfig_(type);
-  var sheetName = e.range.getSheet().getName();
-  if (cfg && cfg.sheetName && sheetName !== cfg.sheetName) return;
+
+  var expected = null;
+  try {
+    expected = sheetForType_(type);
+  } catch (err) {
+    console.error(type + " submit: " + err);
+    return;
+  }
+  if (e.range.getSheet().getSheetId() !== expected.getSheetId()) return;
 
   notifyWorker_(HOOK_PATHS[type], { row: e.range.getRow() });
 }
@@ -403,4 +480,58 @@ function sendEmail_(params) {
   MailApp.sendEmail({ to: to, subject: subject, body: body, name: "RISK" });
 
   return { to: to, remainingQuota: MailApp.getRemainingDailyQuota() };
+}
+
+// -------------------------------------------------------- rank 24: interviews
+
+/**
+ * Creates the interview event and invites the applicant.
+ *
+ * This runs here, not through the service account: a service account cannot add
+ * guests without domain-wide delegation. Times arrive as the local date and time
+ * the director typed, and are built in the script's own timezone rather than
+ * being converted twice.
+ */
+function createInterviewEvent_(params) {
+  var date = String(params.date || "");
+  var time = String(params.time || "");
+  var minutes = Number(params.durationMinutes || 30);
+  var guest = String(params.guestEmail || "").trim();
+
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) fail_("date must be YYYY-MM-DD");
+  if (!/^\d{2}:\d{2}$/.test(time)) fail_("time must be HH:MM");
+  if (!(minutes > 0 && minutes <= 480)) fail_("duration must be 1-480 minutes");
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(guest)) fail_('"' + guest + '" is not an email address');
+
+  var parts = date.split("-");
+  var clock = time.split(":");
+  var start = new Date(
+    Number(parts[0]),
+    Number(parts[1]) - 1,
+    Number(parts[2]),
+    Number(clock[0]),
+    Number(clock[1]),
+    0
+  );
+  if (isNaN(start.getTime())) fail_("couldn't build a date from " + date + " " + time);
+  var end = new Date(start.getTime() + minutes * 60 * 1000);
+
+  var calendarId = props_().getProperty("INTERVIEW_CALENDAR_ID");
+  var calendar = calendarId
+    ? CalendarApp.getCalendarById(calendarId)
+    : CalendarApp.getDefaultCalendar();
+  if (!calendar) fail_("interview calendar not found: " + calendarId);
+
+  var event = calendar.createEvent(String(params.title || "RISK interview"), start, end, {
+    guests: guest,
+    sendInvites: true,
+    description: String(params.description || ""),
+  });
+
+  return {
+    eventId: event.getId(),
+    startsAt: start.toISOString(),
+    endsAt: end.toISOString(),
+    timeZone: calendar.getTimeZone(),
+  };
 }

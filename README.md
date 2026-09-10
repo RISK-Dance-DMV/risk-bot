@@ -2,8 +2,8 @@
 
 Cloudflare Worker + Apps Script. Currently implements **rank 6 — draft → approve
 → publish**, **rank 21 — form registration**, **rank 22 — application intake**,
-**rank 23 — decision** and **rank 27 — email** from design doc v11, plus the slice
-of rank 0a they need.
+**rank 23 — decision**, **rank 24 — interview** and **rank 27 — email** from
+design doc v11, plus the slice of rank 0a they need.
 
 ## What's here
 
@@ -21,21 +21,21 @@ of rank 0a they need.
 | `/form register` | `src/commands/formRegister.ts` |
 | Command gating (three layers) | `src/commands/gate.ts` |
 | Draft → approve → publish | `src/drafts/draft.ts` · `service.ts` |
+| Interviews | `src/applications/interview.ts` · `interviewSlot.ts` |
 | Email templates + sending | `src/email/templates.ts` · `service.ts` |
 | Audit trail | `src/audit.ts` |
 | Worker routes | `src/index.ts` |
 | Discord REST, Ed25519 verify | `src/discord/` |
 | Form trigger + sheet reads | `apps-script/Code.gs` |
 
-**Deliberately not built:** rank 24 (interview), rank 25 (digests). Also not
-built, despite appearing in §27's endpoint list: `readDirectory` /
-`writeDirectory` (rank 2/3) and `createInterviewEvent` (rank 24). That list is the
-Apps Script surface inventory, not rank 27's work — `registerForm` came from it at
-rank 21 for the same reason. No waitlist or interview
-statuses; those are reached from rank 24, not from these buttons. No `/form status` — the register command prints
-the resulting config, and reading it back later isn't wired. No autocomplete, no
-`/features`, no Sheets data seam — the flag registry reads KV
-(`src/config/flags.ts`).
+**Deliberately not built:** rank 25 (digests), so nothing chases an interview
+stuck at `offered`. Capacity-based waitlisting — the waitlist button exists, the
+"we're full" logic doesn't. Also not built, despite appearing in §27's endpoint
+list: `readDirectory` / `writeDirectory` (rank 2/3); that list is the Apps Script
+surface inventory, not rank 27's work — `registerForm` came from it at rank 21 for
+the same reason. No `/form status` — the register command prints the resulting
+config, and reading it back later isn't wired. No autocomplete, no `/features`, no
+Sheets data seam — the flag registry reads KV (`src/config/flags.ts`).
 
 ## Audition methods
 
@@ -64,6 +64,57 @@ A submission that matches no application, carries no email, or matches someone w
 chose the video-submission route is reported to #directors-bot-confirmation once —
 never silently dropped, because the visible consequence would be their card
 closing on schedule.
+
+## Rank 24 — interview
+
+```
+[Interview] → modal → draft → [Approve] sends it → interview-offered
+           → they reply → [Interview Confirmed] → calendar invite → interview-scheduled
+```
+
+`interview-offered` means **we told them** — the draft-to-schedule email was
+sent. The status advances only when the invitation actually goes out through
+rank 6 + 27, never when it's merely written.
+
+**There's a third state the doc doesn't list: `drafted`.** It's the gap between
+writing an invitation and it going out, named for what has happened rather than
+what's intended. Without it, an offer nobody approved looks identical to one that
+was sent — the exact failure §24's gate exists to prevent.
+
+| Card shows | Means |
+| --- | --- |
+| Interview **drafted** | ⚠️ not offered yet — approve the draft to send it |
+| Interview **offered** | invitation emailed, waiting on their reply |
+| Interview **scheduled** | calendar invite sent |
+
+**The modal uses all five components** — availability (prefilled from column AQ,
+reference only), date, start time, minutes, and an optional note. Date and time
+are **separate explicit fields**, not the free text the doc implies, because a
+calendar event can't be built from "sometime Saturday afternoon". The note is
+appended to the rendered template rather than merged, so a template without a
+`{{note}}` field still works and a blank note doesn't count as unfilled.
+
+**Timezones are Apps Script's problem.** The Worker passes the literal date and
+time the director typed; Apps Script builds the event in the calendar's own
+timezone rather than converting twice. Optional `INTERVIEW_CALENDAR_ID` script
+property, defaulting to the RISK account's own calendar.
+
+**`[Interview Confirmed]` opens its own modal**, prefilled with the time you
+offered — because the time they actually agree to often isn't it. Confirming an
+unchanged time is three taps; changing it records `moved from …` on the card and
+builds the event at the new time.
+
+**`[Interview]` only appears after a unanimous yes.** The vote decides whether to
+interview; a rejected or still-undecided card offers nothing, and the button
+disappears once an outcome is recorded.
+
+**Both steps are gated on `email_sends`** — the invitation is an email, and the
+calendar invite emails them too. With the flag off, `[Interview Confirmed]`
+records nothing and says so; the status stays `interview-offered`.
+
+Redrafting is allowed at any point before it's scheduled — the button relabels to
+*Redraft interview*. The superseded draft stays pending in #audition-review; skip
+it by hand.
 
 ## Rank 27 — email
 
@@ -183,9 +234,32 @@ find.
 
 **Unanimous** means every director has voted the same way, at least
 `config:decision_min_votes` (default 2) of them, with no hold outstanding —
-doc §11's open question 3 answered with its own suggested default. That unlocks
-`[Send acceptance]`, which renders **disabled**: actually sending is rank 27 and
-isn't built, so the card shows the gate was reached without pretending it can act.
+doc §11's open question 3 answered with its own suggested default.
+
+### The terminal step
+
+`[WELCOME TO RISK]` `[Reject from RISK]` `[Waitlist]`. Each one drafts the
+matching §27 email and records the outcome; nothing is sent until someone
+approves that draft, so the card reads *"acceptance drafted, not sent yet"* until
+it actually goes.
+
+Reachable **two ways**, which is doc open question 3 (*"does direct acceptance
+into Hearts/Spades still exist?"*) answered **yes**:
+
+- straight after a unanimous vote, skipping the interview
+- after an interview has been scheduled
+
+A unanimous **no** offers only Reject and Waitlist — no welcome button to
+mis-tap. All three stay visible after one is chosen, so a wrong click is
+corrected by pressing another.
+
+Which rejection template gets used depends on **column P**: a clear *yes* gets
+`rejection with feedback`, anything else gets `rejection without feedback`. The
+quieter template is the safer one to pick wrongly.
+
+**Waitlist is a button, not a queue.** Capacity-based waitlisting — auto-flagging
+when the roster is full — needs a number that doesn't exist yet and belongs with
+rank 1's roster counts.
 
 **Feedback** is a modal, stored per director and **hidden until every director has
 written theirs**, so nobody is anchored by what came before. Submitting an empty
@@ -203,10 +277,23 @@ without a stated roster. An explicit ID list is also a stricter check than a rol
 never a permission bit standing in for "director". With it unset, the buttons
 decline and say so rather than silently accepting votes that can never settle.
 
-## Rank 21 — form registration
+## The two forms
+
+They're separate forms, and they're wired up differently on purpose.
+
+**The application form** is addressed by its response sheet URL, not registered.
+It doesn't rotate, so opening the form, proving RISK owns it and tracking its
+history buys nothing. Set the `APPLICATION_SHEET_URL` script property to the
+sheet link **with the responses tab selected** — the tab is picked by the `gid` in
+that URL — then run `installApplicationTrigger()` once from the Apps Script
+editor. It prints the tab it found and the C/D/E headers so you can eyeball them
+there rather than discovering a mismatch on the first real applicant.
+
+**The audition form** rotates twice a year (doc §26), so it goes through
+registration:
 
 ```
-/form register type:<application|audition> url:<form url>
+/form register type:audition url:<audition form url>
 ```
 
 Directors only, in #directors-bot-confirmation. Gated three ways per doc §2:
@@ -220,11 +307,14 @@ no trigger. It refuses when:
 - the form wasn't created by the RISK account (a trigger can't be installed on a
   form RISK doesn't own — the owner's address is named in the refusal)
 - the form has no linked response spreadsheet
-- **application only:** C/D/E don't verify, naming what it found in each
-- **audition only:** no column looks like an email, so nothing could ever be matched
+- no column looks like an email, so submissions could never be matched to an
+  application
 
 On success it installs the trigger, records the previous form's ID and the dates
 it was live, and writes the new config.
+
+Both triggers guard on the **sheet id**, not the tab name, so renaming a tab
+doesn't silently stop intake.
 
 ## Before this can run
 
@@ -273,15 +363,20 @@ name and keeps the ID) rather than a bulk overwrite.
 
 **Apps Script** — paste `apps-script/Code.gs` into a script owned by the RISK
 account. Set script properties `APPS_SCRIPT_SECRET`, `INBOUND_SECRET`,
-`WORKER_URL`. Deploy as a web app: **Execute as me**, **Anyone**. Don't set the
-form properties by hand — `/form register` writes them.
+`WORKER_URL`, `APPLICATION_SHEET_URL`. Deploy as a web app: **Execute as me**,
+**Anyone**. Don't set the `forms.*` properties by hand — `/form register` writes
+those.
 
-**Register the forms.** Nothing reads a sheet until this runs:
+**Wire up the two forms.** Nothing reads a sheet until both are done:
 
 ```
-/form register type:application url:<application form url>
-/form register type:audition    url:<audition form url>
+run installApplicationTrigger() once from the Apps Script editor
+/form register type:audition url:<audition form url>
 ```
+
+`APPLICATION_SHEET_URL` appears twice on purpose — in Apps Script it's the data
+source, in `wrangler.toml` it's what the `[Sheet row]` buttons link to. Same URL,
+two jobs.
 
 **GitHub Actions** — repo secrets `WORKER_URL` and `INBOUND_SECRET`.
 

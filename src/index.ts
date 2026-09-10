@@ -2,7 +2,7 @@ import { runAuditionReconcile, handleAuditionSubmit } from "./applications/audit
 import { runBackstop } from "./applications/backstop";
 import {
   buildOpenRowResponse,
-  isDecisionAction,
+  isDirectorAction,
   parseCustomId,
   type CardAction,
 } from "./applications/card";
@@ -14,6 +14,15 @@ import {
   setCardState,
   sheetRowUrl,
 } from "./applications/intake";
+import {
+  confirmInterview,
+  confirmModalFor,
+  draftInterview,
+  interviewModalFor,
+  readInterviewModal,
+} from "./applications/interview";
+import { recordOutcome } from "./applications/outcome";
+import { draftReply, readReplyModal, replyModalFor } from "./applications/reply";
 import { runStaleSweep } from "./applications/stale";
 import {
   applyBallot,
@@ -209,6 +218,35 @@ async function applyDecisionAction(
 }
 
 /**
+ * Actions that answer the clicker in words rather than just redrawing the card.
+ * Returns null for the ones whose confirmation *is* the redrawn card.
+ */
+async function spokenAction(
+  env: Env,
+  interaction: Interaction,
+  action: CardAction,
+  row: number,
+  userId: string,
+): Promise<(() => Promise<MessagePayload>) | null> {
+  switch (action) {
+    case "interview-save":
+      return () => draftInterview(env, row, userId, readInterviewModal(interaction));
+    case "interview-confirm-save":
+      return () => confirmInterview(env, row, userId, readInterviewModal(interaction));
+    case "outcome-welcome":
+      return () => recordOutcome(env, row, userId, "welcomed");
+    case "outcome-reject":
+      return () => recordOutcome(env, row, userId, "rejected");
+    case "outcome-waitlist":
+      return () => recordOutcome(env, row, userId, "waitlisted");
+    case "reply-save":
+      return () => draftReply(env, row, readReplyModal(interaction));
+    default:
+      return null;
+  }
+}
+
+/**
  * Decision clicks are gated on the director roster, then answered with a deferred
  * *update* - the confirmation the director sees is the tally on the card itself.
  */
@@ -233,10 +271,42 @@ async function handleDecision(
     return json(ephemeral("Decisions are directors only."));
   }
 
-  // A modal has to be the immediate response; it can't follow a defer.
+  // Modals have to be the immediate response; they can't follow a defer.
   if (action === "feedback") {
     const record = await getRecord(env, row);
     return json(feedbackModalResponse(row, record?.decision?.feedback?.[userId]?.text ?? ""));
+  }
+  if (action === "interview") {
+    return json(await interviewModalFor(env, row));
+  }
+  if (action === "interview-confirm") {
+    return json(await confirmModalFor(env, row));
+  }
+  if (action === "reply") {
+    return json(await replyModalFor(env, row));
+  }
+
+  // These can fail in ways worth reading — a bad date, a missing template — so
+  // they answer with a message rather than only redrawing the card.
+  const spoken = await spokenAction(env, interaction, action, row, userId);
+  if (spoken) {
+    ctx.waitUntil(
+      (async () => {
+        let payload: MessagePayload;
+        try {
+          payload = await spoken();
+        } catch (err) {
+          payload = {
+            content: `That didn't go through: ${err instanceof Error ? err.message : String(err)}`,
+          };
+        }
+        await editOriginalResponse(env, interaction.application_id, interaction.token, payload);
+      })(),
+    );
+    return json({
+      type: InteractionResponseType.DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE,
+      data: { flags: MessageFlags.EPHEMERAL },
+    });
   }
 
   ctx.waitUntil(
@@ -364,7 +434,7 @@ async function handleInteraction(
       if (!(await isEnabled(env, "applications"))) {
         return json(ephemeral("Applications are switched off."));
       }
-      if (isDecisionAction(parsed.action)) {
+      if (isDirectorAction(parsed.action)) {
         return handleDecision(env, interaction, ctx, parsed.action, parsed.row);
       }
       ctx.waitUntil(respondDeferred(env, interaction, parsed.action, parsed.row));
@@ -382,22 +452,30 @@ async function handleInteraction(
     }
 
     const parsed = parseCustomId(interaction.data?.custom_id ?? "");
-    if (parsed?.action === "feedback-save") {
+    if (parsed) {
       if (!(await isEnabled(env, "applications"))) {
         return json(ephemeral("Applications are switched off."));
       }
-      const userId = callerId(interaction);
-      const directorIds = await getDirectorIds(env);
-      if (!userId || !isDirector(directorIds, userId)) {
-        return json(ephemeral("Feedback is directors only."));
+      if (
+        parsed.action === "interview-save" ||
+        parsed.action === "interview-confirm-save" ||
+        parsed.action === "reply-save"
+      ) {
+        return handleDecision(env, interaction, ctx, parsed.action, parsed.row);
       }
-      const text = modalFeedbackValue(interaction);
-      ctx.waitUntil(
-        saveFeedback(env, parsed.row, userId, text).catch((err) =>
-          console.error("saveFeedback failed", parsed.row, err),
-        ),
-      );
-      return json({ type: InteractionResponseType.DEFERRED_UPDATE_MESSAGE });
+      if (parsed.action === "feedback-save") {
+        const userId = callerId(interaction);
+        const directorIds = await getDirectorIds(env);
+        if (!userId || !isDirector(directorIds, userId)) {
+          return json(ephemeral("Feedback is directors only."));
+        }
+        ctx.waitUntil(
+          saveFeedback(env, parsed.row, userId, modalFeedbackValue(interaction)).catch((err) =>
+            console.error("saveFeedback failed", parsed.row, err),
+          ),
+        );
+        return json({ type: InteractionResponseType.DEFERRED_UPDATE_MESSAGE });
+      }
     }
   }
 

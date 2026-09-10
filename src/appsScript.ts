@@ -131,3 +131,26 @@ export function sendEmail(
 ): Promise<SendEmailResult> {
   return call<SendEmailResult>(env, "sendEmail", params);
 }
+
+// -------------------------------------------------------- rank 24: interviews
+
+export interface InterviewEvent {
+  eventId: string;
+  startsAt: string;
+  endsAt: string;
+  timeZone: string;
+}
+
+export function createInterviewEvent(
+  env: Env,
+  params: {
+    date: string;
+    time: string;
+    durationMinutes: number;
+    guestEmail: string;
+    title: string;
+    description: string;
+  },
+): Promise<InterviewEvent> {
+  return call<InterviewEvent>(env, "createInterviewEvent", params);
+}

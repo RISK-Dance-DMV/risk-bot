@@ -6,6 +6,7 @@ import {
   indexToCol,
   parseRow,
   verifyPinnedHeaders,
+  wantsFeedback,
 } from "../src/applications/fields";
 
 describe("colToIndex", () => {
@@ -116,5 +117,22 @@ describe("indexToCol", () => {
 
   it("round-trips every column the sheet could plausibly use", () => {
     for (let i = 0; i < 200; i++) expect(colToIndex(indexToCol(i))).toBe(i);
+  });
+});
+
+describe("wantsFeedback", () => {
+  it("treats a clear yes as a yes", () => {
+    expect(wantsFeedback("Yes")).toBe(true);
+    expect(wantsFeedback("  yes please  ")).toBe(true);
+  });
+
+  it("treats anything else as no, including blanks and maybes", () => {
+    expect(wantsFeedback("")).toBe(false);
+    expect(wantsFeedback("No")).toBe(false);
+    expect(wantsFeedback("maybe")).toBe(false);
+  });
+
+  it("doesn't match yes inside another word", () => {
+    expect(wantsFeedback("yesterday")).toBe(false);
   });
 });
