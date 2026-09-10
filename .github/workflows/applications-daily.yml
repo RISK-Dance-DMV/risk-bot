@@ -1,0 +1,30 @@
+# Daily application jobs (design doc rank 22).
+#
+#   1. Backstop - the form trigger fails silently, which looks exactly like "no
+#      applications came in". This reads the response sheet directly and posts
+#      anything that never got a card.
+#   2. Stale sweep - closes RISK-audition-process cards whose window ran out.
+#
+# Scheduled Actions run 5-30 minutes late; nothing here assumes a minute.
+name: applications-daily
+
+on:
+  schedule:
+    - cron: "20 13 * * *"
+  workflow_dispatch:
+
+jobs:
+  daily:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run daily application jobs
+        env:
+          WORKER_URL: ${{ secrets.WORKER_URL }}
+          INBOUND_SECRET: ${{ secrets.INBOUND_SECRET }}
+        run: |
+          set -euo pipefail
+          curl -sS -f -X POST \
+            -H "X-RISK-Secret: ${INBOUND_SECRET}" \
+            -H "Content-Type: application/json" \
+            -d '{}' \
+            "${WORKER_URL%/}/jobs/applications-daily"

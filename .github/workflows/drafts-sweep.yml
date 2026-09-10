@@ -1,0 +1,25 @@
+# Re-pings drafts still unactioned 48h before the date they reference
+# (design doc rank 6). Scheduled Actions run 5-30 minutes late; nothing here
+# assumes a minute.
+name: drafts-sweep
+
+on:
+  schedule:
+    - cron: "40 13 * * *"
+  workflow_dispatch:
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sweep drafts
+        env:
+          WORKER_URL: ${{ secrets.WORKER_URL }}
+          INBOUND_SECRET: ${{ secrets.INBOUND_SECRET }}
+        run: |
+          set -euo pipefail
+          curl -sS -f -X POST \
+            -H "X-RISK-Secret: ${INBOUND_SECRET}" \
+            -H "Content-Type: application/json" \
+            -d '{}' \
+            "${WORKER_URL%/}/jobs/drafts-sweep"

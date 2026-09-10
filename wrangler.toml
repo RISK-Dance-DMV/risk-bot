@@ -1,0 +1,31 @@
+name = "risk-bot"
+main = "src/index.ts"
+compatibility_date = "2025-06-01"
+
+# Channel *names*, never IDs (design doc §2) - resolved at job start, re-resolved on 404.
+[vars]
+GUILD_COMMUNITY_NAME = "RISK Community"
+CH_AUDITION_REVIEW = "audition-review"
+CH_DIRECTORS_CONFIRMATION = "directors-bot-confirmation"
+
+# Application response sheet. The gid is read from this URL, so paste the link
+# with the responses tab selected. Not a credential - Google controls access.
+APPLICATION_SHEET_URL = "https://docs.google.com/spreadsheets/d/1sVrn-TsQhlTfiQ1s7KIONEkAmMgx4BbJMGMURK4t8G8/edit?gid=279287741#gid=279287741"
+
+# Guild IDs are IDs by necessity; fill in via `wrangler secret` or here.
+# GUILD_COMMUNITY_ID = "..."
+# GUILD_DANCE_ID = "..."
+
+[[kv_namespaces]]
+binding = "KV"
+id = "ded6bd9a990747d58a035672dcf05783"
+preview_id = "d2d8406da4054a07977b35f94830edf1"
+
+# Secrets (wrangler secret put <NAME>):
+#   DISCORD_PUBLIC_KEY   - for interaction signature verification
+#   DISCORD_BOT_TOKEN    - REST calls
+#   DISCORD_APPLICATION_ID - for slash command registration
+#   ROLE_DIRECTOR_ID     - layer-3 gating on /form register
+#   APPS_SCRIPT_URL      - deployed web app /exec URL
+#   APPS_SCRIPT_SECRET   - Worker -> Apps Script
+#   INBOUND_SECRET       - Apps Script notifier + Actions cron -> Worker
