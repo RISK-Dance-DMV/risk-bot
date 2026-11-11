@@ -34,7 +34,11 @@ export type SettingKey =
   | "diamonds_start_heads_up_days"
   | "diamonds_review_min_days"
   | "diamonds_review_max_days"
-  | "diamonds_min_scores";
+  | "diamonds_min_scores"
+  | "diamonds_notice_first"
+  | "diamonds_notice_second"
+  | "diamonds_notice_final"
+  | "diamonds_retry_months";
 
 const DEFAULTS: Record<SettingKey, number> = {
   /** Days a "RISK audition process" card waits for a submission before closing. */
@@ -171,6 +175,43 @@ const DEFAULTS: Record<SettingKey, number> = {
    * sit there unnoticed.
    */
   diamonds_min_scores: 2,
+  /**
+   * The renewal ladder: days before someone's enforcement date that they get
+   * told about it. Two months, one month, twenty days.
+   *
+   * Three rungs rather than one because the thing being asked for takes weeks,
+   * not minutes — a re-audition is three rounds and two three-day windows, so a
+   * single warning would have to come so early that it reads as noise and so
+   * late that it is useless. The spacing narrows on purpose: sixty days is "put
+   * it in your calendar", thirty is "pick your week", twenty is "there is just
+   * about room left to finish".
+   *
+   * Twenty is not an arbitrary floor. Three rounds need about sixteen days end
+   * to end at the slow end of the review promise, so a notice later than that
+   * would be telling someone about a deadline they can no longer meet.
+   *
+   * Only the most urgent rung reached is ever sent — see `noticeDue` — so
+   * tightening these can't produce a burst.
+   */
+  diamonds_notice_first: 60,
+  diamonds_notice_second: 30,
+  diamonds_notice_final: 20,
+  /**
+   * Months someone has to wait after an audition they didn't pass.
+   *
+   * Months rather than days because it is a season, not a cooling-off period:
+   * the point is that whatever was short of the bar takes a stretch of actual
+   * training to move, and six months is the gap between two audition windows.
+   *
+   * It applies to any audition that ended without a pass, at whichever round it
+   * ended. Not to someone who withdrew — withdrawing is leaving, not failing,
+   * and the record never got far enough to say otherwise.
+   *
+   * Directors can put someone back on the list inside it with `/diamonds add`,
+   * which is the same escape hatch registration-after-close uses. Whether an
+   * exception is right is their call to make and not this file's.
+   */
+  diamonds_retry_months: 6,
 };
 
 export async function getNumber(env: Env, key: SettingKey): Promise<number> {

@@ -2,16 +2,57 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // Hoisted, because vi.mock's factory is lifted above the imports and cannot
 // reach a plain top-level const.
-const { sendDirectMessage } = vi.hoisted(() => ({
-  sendDirectMessage: vi.fn(
-    async (
-      _env: unknown,
-      _userId: string,
-      _payload: { content?: string },
-    ): Promise<boolean> => true,
-  ),
+const {
+  sendDirectMessage,
+  postToChannelByName,
+  editMessage,
+  alertDirectors,
+  removeRole,
+} =
+  vi.hoisted(() => ({
+    sendDirectMessage: vi.fn(
+      async (
+        _env: unknown,
+        _userId: string,
+        _payload: { content?: string },
+      ): Promise<boolean> => true,
+    ),
+    postToChannelByName: vi.fn(
+      async (
+        _env: unknown,
+        _guildId: string,
+        _name: string,
+        _payload: unknown,
+      ): Promise<{ id: string; channelId: string }> => ({
+        id: "msg1",
+        channelId: "chan1",
+      }),
+    ),
+    removeRole: vi.fn(
+      async (
+        _env: unknown,
+        _guildId: string,
+        _userId: string,
+        _roleId: string,
+      ): Promise<void> => {},
+    ),
+    editMessage: vi.fn(
+      async (
+        _env: unknown,
+        _channelId: string,
+        _messageId: string,
+        _payload: unknown,
+      ): Promise<void> => {},
+    ),
+    alertDirectors: vi.fn(async (_env: unknown, _content: string): Promise<void> => {}),
+  }));
+vi.mock("../src/discord/rest", () => ({
+  sendDirectMessage,
+  postToChannelByName,
+  editMessage,
+  alertDirectors,
+  removeRole,
 }));
-vi.mock("../src/discord/rest", () => ({ sendDirectMessage }));
 
 import {
   activeRound,
@@ -47,6 +88,7 @@ import {
   fileFeedback,
   getRecord,
   grantExtension,
+  grantMembership,
   noteRound,
   panelContext,
   planStart,
@@ -90,8 +132,41 @@ function kvDouble(initial: Record<string, string> = {}) {
 
 function envWith(initial: Record<string, string> = {}) {
   const { kv, store } = kvDouble(initial);
-  return { env: { KV: kv } as unknown as Env, store };
+  return {
+    env: {
+      KV: kv,
+      GUILD_DANCE_ID: "g-dance",
+      GUILD_COMMUNITY_ID: "g-community",
+      CH_AUDITION_REVIEW: "audition-review",
+      CH_DIAMONDS_BOT: "diamonds-bot",
+    } as unknown as Env,
+    store,
+  };
 }
+
+/** The custom ids on whatever was last posted or edited, in order. */
+const cardButtons = (call: { mock: { calls: unknown[][] } }, index = -1): string[] => {
+  const payload = call.mock.calls.at(index)?.at(-1) as {
+    components?: { components?: { custom_id?: string }[] }[];
+  };
+  return (payload.components ?? []).flatMap((row) =>
+    (row.components ?? []).map((one) => one.custom_id ?? ""),
+  );
+};
+
+/** The embed description of whatever was last posted or edited. */
+const cardText = (call: { mock: { calls: unknown[][] } }, index = -1): string => {
+  const calls = call.mock.calls;
+  const payload = calls.at(index)?.at(-1) as {
+    embeds?: { description?: string; fields?: { name: string; value: string }[]; footer?: { text: string } }[];
+  };
+  const embed = payload.embeds?.[0];
+  return [
+    embed?.description ?? "",
+    ...(embed?.fields ?? []).map((f) => `${f.name}: ${f.value}`),
+    embed?.footer?.text ?? "",
+  ].join("\n");
+};
 
 const seed = (record: DiamondsRecord): [string, string] => [
   `dia:rec:${record.discordId}`,
@@ -122,6 +197,8 @@ const POLICY: DiamondsPolicy = {
   reviewMinDays: 1,
   reviewMaxDays: 5,
   minScores: 2,
+  noticeDays: [20, 30, 60],
+  retryMonths: 6,
   weights: DEFAULT_WEIGHTS,
 };
 
@@ -173,10 +250,27 @@ const feedbackSent = (at = "2026-11-18T00:00:00.000Z") => ({
 /** A sweep that said nothing to anybody. */
 /** The roster order the composed feedback follows. */
 const DIRECTORS = ["d1", "d2"];
-const quiet = { reminded: 0, nudged: 0, headsUp: 0, round0: 0, planned: 0 };
+const quiet = {
+  reminded: 0,
+  nudged: 0,
+  headsUp: 0,
+  round0: 0,
+  planned: 0,
+  renewals: 0,
+  lapsed: 0,
+  blocked: 0,
+};
 const OPEN = new Date("2026-11-18T00:00:00Z");
 
-beforeEach(() => sendDirectMessage.mockClear());
+beforeEach(() => {
+  sendDirectMessage.mockClear();
+  postToChannelByName.mockClear();
+  postToChannelByName.mockResolvedValue({ id: "msg1", channelId: "chan1" });
+  editMessage.mockClear();
+  alertDirectors.mockClear();
+  removeRole.mockClear();
+  removeRole.mockResolvedValue(undefined);
+});
 
 describe("the timeline", () => {
   it("opens at the start of its day and closes at the end of its own", () => {
@@ -267,8 +361,8 @@ describe("setting the timeline before the flag goes on", () => {
 describe("registering", () => {
   it("is idempotent, and reads as being on the list rather than an error", async () => {
     const { env } = envWith();
-    await register(env, "100", "Ada", "new", "2026-11-29", TIMELINE, OPEN);
-    const second = await register(env, "100", "Ada L", "new", undefined, TIMELINE, OPEN);
+    await register(env, "100", "Ada", "new", "2026-11-29", TIMELINE, POLICY, OPEN);
+    const second = await register(env, "100", "Ada L", "new", undefined, TIMELINE, POLICY, OPEN);
     expect(second.ok).toBe(true);
     expect(second.ok && second.record.displayName).toBe("Ada L");
     // Leaving the estimate off keeps whatever was there rather than clearing it.
@@ -281,8 +375,8 @@ describe("registering", () => {
    */
   it("keeps an updated estimate, against Round 0", async () => {
     const { env } = envWith();
-    await register(env, "100", "Ada", "new", "2026-11-29", TIMELINE, OPEN);
-    await register(env, "100", "Ada", "new", "2026-12-06", TIMELINE, OPEN);
+    await register(env, "100", "Ada", "new", "2026-11-29", TIMELINE, POLICY, OPEN);
+    await register(env, "100", "Ada", "new", "2026-12-06", TIMELINE, POLICY, OPEN);
     expect(roundOf((await getRecord(env, "100"))!, 0).plannedStartAt).toBe("2026-12-06");
   });
 
@@ -292,14 +386,14 @@ describe("registering", () => {
         seed(dancer({ rounds: { 1: { assignedPiece: "https://p", windowOpenedAt: "x" } } })),
       ]),
     );
-    await register(env, "100", "Ada", "new", undefined, TIMELINE, OPEN);
+    await register(env, "100", "Ada", "new", undefined, TIMELINE, POLICY, OPEN);
     expect(roundOf((await getRecord(env, "100"))!, 1).windowOpenedAt).toBe("x");
   });
 
   it("shuts once auditions have closed, and sends them to a director", async () => {
     const { env } = envWith();
     const shut = new Date("2027-02-01T00:00:00Z");
-    const result = await register(env, "100", "Ada", "new", undefined, TIMELINE, shut);
+    const result = await register(env, "100", "Ada", "new", undefined, TIMELINE, POLICY, shut);
     expect(result.ok).toBe(false);
     expect(result.ok === false && result.reason).toMatch(/Ask a director/);
   });
@@ -307,16 +401,1208 @@ describe("registering", () => {
   it("still answers someone already on the list after the close", async () => {
     const { env } = envWith(Object.fromEntries([seed(dancer())]));
     const shut = new Date("2027-02-01T00:00:00Z");
-    expect((await register(env, "100", "Ada", "new", undefined, TIMELINE, shut)).ok).toBe(true);
+    expect((await register(env, "100", "Ada", "new", undefined, TIMELINE, POLICY, shut)).ok).toBe(true);
   });
 
-  it("brings someone back if they withdrew and changed their mind", async () => {
-    const { env } = envWith();
-    await register(env, "100", "Ada", "new", undefined, TIMELINE, OPEN);
+  it("holds someone who withdrew to the wait, same as a failure", async () => {
+    const { env } = envWith(Object.fromEntries([seed(dancer())]));
+    await register(env, "100", "Ada", "new", undefined, TIMELINE, POLICY, OPEN);
     await withdraw(env, "100");
+
+    const back = await register(env, "100", "Ada", "new", undefined, TIMELINE, POLICY, OPEN);
+    expect(back.ok).toBe(false);
+    expect(back.ok === false && back.reason).toMatch(/6-month wait/);
     expect((await getRecord(env, "100"))?.withdrawnAt).toBeTruthy();
-    await register(env, "100", "Ada", "new", undefined, TIMELINE, OPEN);
-    expect((await getRecord(env, "100"))?.withdrawnAt).toBeUndefined();
+  });
+});
+
+/**
+ * The directors' end of a submission. `#audition-review` already holds the
+ * applicant and trainee videos, so this is one stack to work through rather
+ * than a third place to remember to look.
+ */
+describe("the review card", () => {
+  it("posts the video to #audition-review and remembers where it put it", async () => {
+    const { env } = envWith(Object.fromEntries([seed(dancer())]));
+    await submit(env, "100", 0, "https://cover", TIMELINE, POLICY, OPEN);
+
+    expect(postToChannelByName).toHaveBeenCalledTimes(1);
+    const [, guild, channel] = postToChannelByName.mock.calls[0]!;
+    expect(guild).toBe("g-community");
+    expect(channel).toBe("audition-review");
+    expect(cardText(postToChannelByName)).toContain("https://cover");
+
+    const entry = roundOf((await getRecord(env, "100"))!, 0);
+    expect(entry.reviewMessageId).toBe("msg1");
+    expect(entry.reviewChannelId).toBe("chan1");
+  });
+
+  it("says what the round still needs, and where the command works", async () => {
+    const { env } = envWith(Object.fromEntries([seed(dancer())]));
+    await submit(env, "100", 0, "https://cover", TIMELINE, POLICY, OPEN);
+    const text = cardText(postToChannelByName);
+    expect(text).toMatch(/Pass or fail/);
+    expect(text).toContain("#diamonds-bot");
+    expect(text).toMatch(/0 of 2 ballots/);
+  });
+
+  /**
+   * The card hangs where both directors read it, so it is one more surface the
+   * seal has to hold on — a number on it would anchor the second of them
+   * exactly as a visible tally in the reply would.
+   */
+  it("shows a count and never a ballot while the round is open", async () => {
+    const { env } = envWith(
+      Object.fromEntries([
+        seed(
+          dancer({
+            rounds: {
+              0: zeroPassed(),
+              1: {
+                assignedPiece: "https://piece",
+                windowOpenedAt: "2026-11-18T00:00:00.000Z",
+                reviewMessageId: "msg1",
+                reviewChannelId: "chan1",
+              },
+            },
+            ...sealed,
+            document: feedbackSent(),
+          }),
+        ),
+      ]),
+    );
+    await submit(env, "100", 1, "https://after", TIMELINE, POLICY, OPEN);
+    await scoreRound(env, "100", "d1", { targetScore: 8 }, POLICY, OPEN);
+
+    const text = cardText(editMessage);
+    expect(text).toMatch(/1 of 2 ballots/);
+    expect(text).not.toContain("8.00");
+    expect(text).not.toMatch(/Advances/);
+  });
+
+  it("puts the scores on once the round has settled", async () => {
+    const { env } = envWith(
+      Object.fromEntries([
+        seed(
+          dancer({
+            rounds: {
+              0: zeroPassed(),
+              1: {
+                assignedPiece: "https://piece",
+                windowOpenedAt: "2026-11-18T00:00:00.000Z",
+                submittedAt: "2026-11-19T00:00:00.000Z",
+                submissionUrl: "https://after",
+                reviewMessageId: "msg1",
+                reviewChannelId: "chan1",
+                ballots: { d1: { targetScore: 8, at: "2026-11-19T00:00:00.000Z" } },
+              },
+            },
+            ...sealed,
+            document: feedbackSent(),
+          }),
+        ),
+      ]),
+    );
+    await scoreRound(env, "100", "d2", { targetScore: 8 }, POLICY, OPEN);
+
+    const text = cardText(editMessage);
+    expect(text).toMatch(/4\.00 → 8\.00/);
+    expect(text).toMatch(/Advances/);
+    expect(text).toMatch(/settled, not sent/);
+  });
+
+  /**
+   * Round 1's card is unreadable without these two: a video of someone dancing
+   * says nothing until you know which one thing you are watching, and what it
+   * looked like before.
+   */
+  it("carries Round 1's target and its fixed before-number", async () => {
+    const { env } = envWith(
+      Object.fromEntries([
+        seed(
+          dancer({
+            rounds: {
+              0: zeroPassed(),
+              1: {
+                assignedPiece: "https://piece",
+                windowOpenedAt: "2026-11-18T00:00:00.000Z",
+              },
+            },
+            ...sealed,
+            document: feedbackSent(),
+          }),
+        ),
+      ]),
+    );
+    await submit(env, "100", 1, "https://after", TIMELINE, POLICY, OPEN);
+    const text = cardText(postToChannelByName);
+    expect(text).toContain("elbows collapse on extensions");
+    expect(text).toContain("4.00/10");
+  });
+
+  it("replaces the video on the card it already has, rather than posting twice", async () => {
+    const { env } = envWith(
+      Object.fromEntries([
+        seed(
+          dancer({
+            rounds: {
+              0: {
+                submittedAt: "2026-11-16T00:00:00.000Z",
+                submissionUrl: "https://first",
+                reviewMessageId: "msg1",
+                reviewChannelId: "chan1",
+              },
+            },
+          }),
+        ),
+      ]),
+    );
+    await submit(env, "100", 0, "https://second", TIMELINE, POLICY, OPEN);
+
+    expect(postToChannelByName).not.toHaveBeenCalled();
+    expect(editMessage).toHaveBeenCalledTimes(1);
+    expect(cardText(editMessage)).toContain("https://second");
+  });
+
+  /**
+   * The submission is written before the card is posted, so a Discord failure
+   * degrades to how the process worked before the card existed.
+   */
+  it("keeps the submission when the card can't be posted, and says so", async () => {
+    const { env } = envWith(Object.fromEntries([seed(dancer())]));
+    postToChannelByName.mockRejectedValueOnce(new Error("no such channel"));
+
+    const result = await submit(env, "100", 0, "https://cover", TIMELINE, POLICY, OPEN);
+    expect(result.ok).toBe(true);
+    expect(roundOf((await getRecord(env, "100"))!, 0).submissionUrl).toBe("https://cover");
+    expect(alertDirectors).toHaveBeenCalledTimes(1);
+    expect(String(alertDirectors.mock.calls[0]?.[1])).toMatch(/submission is\s+recorded/);
+  });
+
+  /** A stale card is bad; a scoring command that reports failure is worse. */
+  it("doesn't fail a ballot because the card couldn't be edited", async () => {
+    const { env } = envWith(
+      Object.fromEntries([
+        seed(
+          dancer({
+            rounds: {
+              0: {
+                submittedAt: "2026-11-16T00:00:00.000Z",
+                reviewMessageId: "msg1",
+                reviewChannelId: "chan1",
+              },
+            },
+          }),
+        ),
+      ]),
+    );
+    editMessage.mockRejectedValueOnce(new Error("message gone"));
+
+    const result = await scoreRound(env, "100", "d1", { verdict: "pass" }, POLICY, OPEN);
+    expect(result.ok).toBe(true);
+    expect(roundOf((await getRecord(env, "100"))!, 0).ballots?.d1?.verdict).toBe("pass");
+  });
+
+  it("marks the card sent once the result has gone out", async () => {
+    const { env } = envWith(
+      Object.fromEntries([
+        seed(
+          dancer({
+            rounds: {
+              0: zeroPassed(),
+              1: {
+                assignedPiece: "https://piece",
+                windowOpenedAt: "2026-11-18T00:00:00.000Z",
+                submittedAt: "2026-11-19T00:00:00.000Z",
+                submissionUrl: "https://after",
+                reviewMessageId: "msg1",
+                reviewChannelId: "chan1",
+                ballots: {
+                  d1: { targetScore: 8, at: "2026-11-19T00:00:00.000Z" },
+                  d2: { targetScore: 8, at: "2026-11-19T00:00:00.000Z" },
+                },
+              },
+            },
+            ...sealed,
+            document: feedbackSent(),
+          }),
+        ),
+      ]),
+    );
+    const result = await sendResult(env, "100", DIRECTORS, CTX, POLICY, OPEN);
+    expect(result.ok).toBe(true);
+
+    const text = cardText(editMessage);
+    expect(text).toMatch(/Result sent/);
+    expect(text).toMatch(/result sent/);
+    expect(text).toMatch(/nothing owed/);
+  });
+});
+
+/**
+ * The card's buttons are the point of putting it in that channel at all:
+ * `/diamonds` is registered to the dance guild and the card hangs in the
+ * community one, so a command named on it is a command you have to go
+ * elsewhere to run.
+ */
+describe("the review card's buttons", () => {
+  it("gives Round 0 a pass, a fail and the document", async () => {
+    const { env } = envWith(Object.fromEntries([seed(dancer())]));
+    await submit(env, "100", 0, "https://cover", TIMELINE, POLICY, OPEN);
+
+    expect(cardButtons(postToChannelByName)).toEqual([
+      "dia|verdict|100:pass",
+      "dia|verdict|100:fail",
+      "dia|doc|100",
+    ]);
+  });
+
+  /**
+   * No round in any of them. A button lives as long as its message, so the
+   * round is derived from the record when it's pressed — a card from last week
+   * with `:1` baked in would take a Round 1 ballot on a Round 2 video.
+   */
+  it("names the dancer and never the round", async () => {
+    const { env } = envWith(
+      Object.fromEntries([
+        seed(
+          dancer({
+            rounds: {
+              0: zeroPassed(),
+              1: { assignedPiece: "https://piece", windowOpenedAt: "2026-11-18T00:00:00.000Z" },
+            },
+            ...sealed,
+            document: feedbackSent(),
+          }),
+        ),
+      ]),
+    );
+    await submit(env, "100", 1, "https://after", TIMELINE, POLICY, OPEN);
+
+    const ids = cardButtons(postToChannelByName);
+    expect(ids).toEqual(["dia|score|100", "dia|note|100"]);
+    expect(ids.every((one) => !/\|\d$/.test(one))).toBe(true);
+  });
+
+  /** The send button is a read-back, never a send — it is the irreversible step. */
+  it("offers the read-back only once the round has settled", async () => {
+    const { env } = envWith(
+      Object.fromEntries([
+        seed(
+          dancer({
+            rounds: {
+              0: zeroPassed(),
+              1: {
+                assignedPiece: "https://piece",
+                windowOpenedAt: "2026-11-18T00:00:00.000Z",
+                submittedAt: "2026-11-19T00:00:00.000Z",
+                submissionUrl: "https://after",
+                reviewMessageId: "msg1",
+                reviewChannelId: "chan1",
+                ballots: { d1: { targetScore: 8, at: "2026-11-19T00:00:00.000Z" } },
+              },
+            },
+            ...sealed,
+            document: feedbackSent(),
+          }),
+        ),
+      ]),
+    );
+    await scoreRound(env, "100", "d2", { targetScore: 8 }, POLICY, OPEN);
+    expect(cardButtons(editMessage)).toContain("dia|preview|100");
+  });
+
+  it("takes every button off once the result has gone", async () => {
+    const { env } = envWith(
+      Object.fromEntries([
+        seed(
+          dancer({
+            rounds: {
+              0: zeroPassed(),
+              1: {
+                assignedPiece: "https://piece",
+                windowOpenedAt: "2026-11-18T00:00:00.000Z",
+                submittedAt: "2026-11-19T00:00:00.000Z",
+                submissionUrl: "https://after",
+                reviewMessageId: "msg1",
+                reviewChannelId: "chan1",
+                ballots: {
+                  d1: { targetScore: 8, at: "2026-11-19T00:00:00.000Z" },
+                  d2: { targetScore: 8, at: "2026-11-19T00:00:00.000Z" },
+                },
+              },
+            },
+            ...sealed,
+            document: feedbackSent(),
+          }),
+        ),
+      ]),
+    );
+    await sendResult(env, "100", DIRECTORS, CTX, POLICY, OPEN);
+    expect(cardButtons(editMessage)).toEqual([]);
+  });
+
+  it("offers to rewrite a document that exists", async () => {
+    const { env } = envWith(
+      Object.fromEntries([
+        seed(
+          dancer({
+            rounds: {
+              0: {
+                submittedAt: "2026-11-16T00:00:00.000Z",
+                reviewMessageId: "msg1",
+                reviewChannelId: "chan1",
+              },
+            },
+          }),
+        ),
+      ]),
+    );
+    await fileFeedback(
+      env,
+      "100",
+      {
+        content: "Clean lines.",
+        strengths: ["a", "b", "c"],
+        growthAreas: ["arms"],
+      },
+      "d1",
+      TIMELINE,
+      POLICY,
+      OPEN,
+    );
+    expect(cardText(editMessage)).toMatch(/Feedback written/);
+    expect(cardButtons(editMessage)).toContain("dia|doc|100");
+  });
+
+  /** Every new action has to survive the round trip through a custom id. */
+  it("parses each of its own ids back", () => {
+    for (const id of [
+      "dia|verdict|100:pass",
+      "dia|score|100",
+      "dia|score-save|100",
+      "dia|doc|100",
+      "dia|note|100",
+      "dia|preview|100",
+    ]) {
+      expect(parseDiamondsCustomId(id)).not.toBeNull();
+    }
+    expect(parseDiamondsCustomId("dia|verdict|")).toBeNull();
+  });
+});
+
+/**
+ * Membership, which is the only thing on the record that outlives the audition.
+ */
+describe("membership", () => {
+  const eights = {
+    technicality: 8,
+    execution: 8,
+    performance: 8,
+    musicality: 8,
+  } as const;
+
+  /** Everything done but the Round 2 result. */
+  const finalist = (over: Partial<DiamondsRecord> = {}): DiamondsRecord =>
+    dancer({
+      rounds: {
+        0: zeroPassed(),
+        1: {
+          submittedAt: "2026-11-19T00:00:00.000Z",
+          resultSentAt: "2026-11-20T00:00:00.000Z",
+          outcome: "advanced",
+        },
+        2: {
+          assignedPiece: "https://final",
+          windowOpenedAt: "2026-11-21T00:00:00.000Z",
+          submittedAt: "2026-11-22T00:00:00.000Z",
+          submissionUrl: "https://mine",
+          ballots: {
+            d1: { scores: { ...eights }, at: "2026-11-23T00:00:00.000Z" },
+            d2: { scores: { ...eights }, at: "2026-11-23T00:00:00.000Z" },
+          },
+        },
+      },
+      ...sealed,
+      document: feedbackSent(),
+      ...over,
+    });
+
+  it("starts membership when the pass is sent, and sets the date from it", async () => {
+    const { env } = envWith(Object.fromEntries([seed(finalist())]));
+    const sent = new Date("2026-11-24T12:00:00Z");
+
+    const result = await sendResult(env, "100", DIRECTORS, CTX, POLICY, sent);
+    expect(result.ok && result.outcome).toBe("passed");
+
+    const stored = (await getRecord(env, "100"))!;
+    expect(stored.memberSince).toBe(sent.toISOString());
+    // November, so the January two years out.
+    expect(stored.enforcedAt).toBe("2028-01-01T05:00:00.000Z");
+  });
+
+  /**
+   * Said once, at the one moment it is unambiguously good news. First hearing
+   * of it sixty days before it expires would make it an eviction notice.
+   */
+  it("tells them the date inside the message that welcomes them", async () => {
+    const { env } = envWith(Object.fromEntries([seed(finalist())]));
+    await sendResult(env, "100", DIRECTORS, CTX, POLICY, new Date("2026-11-24T12:00:00Z"));
+
+    const sent = String(sendDirectMessage.mock.calls.at(-1)?.[2]?.content);
+    expect(sent).toMatch(/You've passed/);
+    expect(sent).toMatch(/membership runs to/);
+  });
+
+  /**
+   * Keyed by rung, so a renewed member carrying last term's markers would have
+   * every rung of the new term already marked sent — and would never be warned
+   * again. The bug can't fire until re-auditions exist; the guard goes in with
+   * the thing it guards.
+   */
+  it("starts the ladder over when the date moves", async () => {
+    const { env } = envWith(
+      Object.fromEntries([
+        seed(
+          finalist({
+            renewalNoticedAt: {
+              "60": "2026-01-01T00:00:00.000Z",
+              "30": "2026-02-01T00:00:00.000Z",
+              "20": "2026-02-10T00:00:00.000Z",
+            },
+          }),
+        ),
+      ]),
+    );
+    await sendResult(env, "100", DIRECTORS, CTX, POLICY, new Date("2026-11-24T12:00:00Z"));
+    expect((await getRecord(env, "100"))?.renewalNoticedAt).toBeUndefined();
+  });
+
+  it("gives a director no date to be chased about", async () => {
+    const { env } = envWith(Object.fromEntries([seed(finalist({ discordId: "d1" }))]));
+    await sendResult(env, "d1", DIRECTORS, CTX, POLICY, new Date("2026-11-24T12:00:00Z"));
+
+    const stored = (await getRecord(env, "d1"))!;
+    expect(roundOf(stored, 2).outcome).toBe("passed");
+    expect(stored.enforcedAt).toBeUndefined();
+  });
+
+  it("gives nothing to someone who didn't pass", async () => {
+    const low = { technicality: 5, execution: 5, performance: 5, musicality: 5 } as const;
+    const { env } = envWith(
+      Object.fromEntries([
+        seed(
+          finalist({
+            rounds: {
+              ...finalist().rounds,
+              2: {
+                ...finalist().rounds[2]!,
+                ballots: {
+                  d1: { scores: { ...low }, at: "2026-11-23T00:00:00.000Z" },
+                  d2: { scores: { ...low }, at: "2026-11-23T00:00:00.000Z" },
+                },
+              },
+            },
+          }),
+        ),
+      ]),
+    );
+    await sendResult(env, "100", DIRECTORS, CTX, POLICY, new Date("2026-11-24T12:00:00Z"));
+
+    const stored = (await getRecord(env, "100"))!;
+    expect(stored.memberSince).toBeUndefined();
+    expect(stored.enforcedAt).toBeUndefined();
+  });
+});
+
+/**
+ * Registering again is the door. One door rather than a second command: a
+ * dancer who has finished and wants another go looks for the thing they used
+ * the first time.
+ */
+describe("registering again", () => {
+  const finished = (): DiamondsRecord =>
+    dancer({
+      registeredAt: "2026-10-01T00:00:00.000Z",
+      rounds: {
+        0: zeroPassed(),
+        1: { submittedAt: "a", resultSentAt: "b", outcome: "advanced" },
+        2: { submittedAt: "c", resultSentAt: "d", outcome: "passed" },
+      },
+      ...sealed,
+      document: feedbackSent(),
+      memberSince: "2026-11-24T00:00:00.000Z",
+      enforcedAt: "2028-01-01T05:00:00.000Z",
+    });
+
+  it("archives the finished audition and starts a clean one", async () => {
+    const { env } = envWith(Object.fromEntries([seed(finished())]));
+    const again = new Date("2027-06-01T12:00:00Z");
+
+    const result = await register(env, "100", "Ada", "new", undefined, TIMELINE, POLICY, again);
+    expect(result.ok).toBe(true);
+
+    const stored = (await getRecord(env, "100"))!;
+    expect(stored.rounds).toEqual({});
+    expect(stored.history).toHaveLength(1);
+    expect(stored.cohort).toBe("returning");
+    expect(stored.enforcedAt).toBe("2028-01-01T05:00:00.000Z");
+    expect(stored.targetFixedAt).toBeUndefined();
+  });
+
+  /**
+   * Someone who withdrew part-way and came back is picking up where they left
+   * off, not starting again — which is what this always did.
+   */
+  /**
+   * A director overriding a withdrawal is almost always fixing a mistake, so
+   * that door restores the audition. The dancer's own door starts a new one.
+   */
+  it("lets a director restore an audition that was dropped", async () => {
+    const { env } = envWith(
+      Object.fromEntries([
+        seed(
+          dancer({
+            rounds: { 0: zeroPassed(), 1: { assignedPiece: "https://piece" } },
+            ...sealed,
+            document: feedbackSent(),
+            withdrawnAt: "2026-12-01T00:00:00.000Z",
+          }),
+        ),
+      ]),
+    );
+    await addEntry(env, "100", "new", 1, TIMELINE, POLICY, OPEN);
+
+    const stored = (await getRecord(env, "100"))!;
+    expect(stored.history).toBeUndefined();
+    expect(roundOf(stored, 1).assignedPiece).toBe("https://piece");
+    expect(stored.withdrawnAt).toBeUndefined();
+  });
+
+  /** The reset runs, and then the cohort the director chose wins. */
+  it("lets a director add a finished member back with a cohort of their choosing", async () => {
+    const { env } = envWith(Object.fromEntries([seed(finished())]));
+    const result = await addEntry(env, "100", "new", 0, TIMELINE, POLICY, new Date("2027-06-01T12:00:00Z"));
+    expect(result.ok).toBe(true);
+
+    const stored = (await getRecord(env, "100"))!;
+    expect(stored.history).toHaveLength(1);
+    expect(stored.rounds).toEqual({});
+    expect(stored.cohort).toBe("new");
+  });
+
+  /** Round 0 for a renewing member is the application and current feedback. */
+  it("asks a renewing member for nothing and opens their feedback", async () => {
+    const { env } = envWith(Object.fromEntries([seed(finished())]));
+    await register(env, "100", "Ada", "new", undefined, TIMELINE, POLICY, new Date("2027-06-01T12:00:00Z"));
+    const stored = (await getRecord(env, "100"))!;
+
+    expect((await submit(env, "100", 0, "https://nope", TIMELINE, POLICY, new Date("2027-06-02T12:00:00Z"))).ok).toBe(false);
+    expect(statusPanel(stored, 0, CTX, new Date("2027-06-02T12:00:00Z")).content).toMatch(
+      /renewal is in/,
+    );
+    expect(statusPanel(stored, 0, CTX, new Date("2027-06-02T12:00:00Z")).content).toMatch(
+      /audition 2/,
+    );
+  });
+});
+
+describe("the renewal notices", () => {
+  const member = (over: Partial<DiamondsRecord> = {}): DiamondsRecord =>
+    dancer({
+      rounds: { 0: zeroPassed(), 2: { resultSentAt: "2027-11-15T00:00:00.000Z", outcome: "passed" } },
+      document: feedbackSent(),
+      memberSince: "2027-11-15T00:00:00.000Z",
+      enforcedAt: "2029-01-01T05:00:00.000Z",
+      ...over,
+    });
+
+  it("says nothing while the date is months off", async () => {
+    const { env } = envWith(Object.fromEntries([seed(member())]));
+    const run = await runDiamondsSweep(env, TIMELINE, POLICY, new Date("2028-09-01T12:00:00Z"));
+    expect(run).toEqual(quiet);
+    expect(sendDirectMessage).not.toHaveBeenCalled();
+  });
+
+  it("sends the two-month notice, once", async () => {
+    const { env } = envWith(Object.fromEntries([seed(member())]));
+    const day = new Date("2028-11-05T12:00:00Z");
+
+    expect(await runDiamondsSweep(env, TIMELINE, POLICY, day)).toEqual({
+      ...quiet,
+      renewals: 1,
+    });
+    expect(String(sendDirectMessage.mock.calls[0]?.[2]?.content)).toMatch(
+      /membership runs to/,
+    );
+    expect((await getRecord(env, "100"))?.renewalNoticedAt?.["60"]).toBeTruthy();
+
+    sendDirectMessage.mockClear();
+    expect(await runDiamondsSweep(env, TIMELINE, POLICY, day)).toEqual(quiet);
+    expect(sendDirectMessage).not.toHaveBeenCalled();
+  });
+
+  /**
+   * A sweep that was down for a fortnight sends the urgent rung and marks the
+   * gentle ones off, rather than working through the ladder a day at a time.
+   */
+  it("sends only the most urgent rung, and retires the rest", async () => {
+    const { env } = envWith(Object.fromEntries([seed(member())]));
+    await runDiamondsSweep(env, TIMELINE, POLICY, new Date("2028-12-20T12:00:00Z"));
+
+    const sent = String(sendDirectMessage.mock.calls[0]?.[2]?.content);
+    expect(sent).toMatch(/12 days/);
+    expect(sent).toMatch(/come off the Diamonds role/);
+
+    const marked = (await getRecord(env, "100"))?.renewalNoticedAt ?? {};
+    expect(Object.keys(marked).sort()).toEqual(["20", "30", "60"]);
+  });
+
+  /** The gentle one never says it. Three removal warnings is none. */
+  it("doesn't threaten removal two months out", async () => {
+    const { env } = envWith(Object.fromEntries([seed(member())]));
+    await runDiamondsSweep(env, TIMELINE, POLICY, new Date("2028-11-05T12:00:00Z"));
+    expect(String(sendDirectMessage.mock.calls[0]?.[2]?.content)).not.toMatch(/come off/);
+  });
+
+  /** Past the date there is nothing left to warn about — it's revoked instead. */
+  it("stops warning once the date has gone by", async () => {
+    const { env } = envWith(Object.fromEntries([seed(member())]));
+    const run = await runDiamondsSweep(env, TIMELINE, POLICY, new Date("2029-01-15T12:00:00Z"));
+    expect(run.renewals).toBe(0);
+  });
+
+  /** They're doing the thing the notice would be asking for. */
+  it("goes quiet while they're mid-re-audition", async () => {
+    const { env } = envWith(
+      Object.fromEntries([
+        seed(member({
+          rounds: {
+            0: { submittedAt: "2028-12-01T00:00:00.000Z", submissionUrl: "https://again" },
+            2: { resultSentAt: "2027-11-15T00:00:00.000Z", outcome: "passed" },
+          },
+        })),
+      ]),
+    );
+    const run = await runDiamondsSweep(env, TIMELINE, POLICY, new Date("2028-12-20T12:00:00Z"));
+    expect(run.renewals).toBe(0);
+  });
+
+  /**
+   * The two directors are Diamonds too, and their renewal is a formality —
+   * they're the ones judging it. Chasing them for a verdict they would have to
+   * give themselves is the bot chasing its own judges.
+   */
+  it("doesn't chase a director about their own renewal", async () => {
+    const { env } = envWith(Object.fromEntries([seed(member({ discordId: "d1" }))]));
+    const run = await runDiamondsSweep(
+      env,
+      TIMELINE,
+      POLICY,
+      new Date("2028-12-20T12:00:00Z"),
+      DIRECTORS,
+    );
+    expect(run.renewals).toBe(0);
+    expect(sendDirectMessage).not.toHaveBeenCalled();
+  });
+
+  /** Forgetting the list chases everybody rather than nobody. */
+  it("chases everyone when no director list is given", async () => {
+    const { env } = envWith(Object.fromEntries([seed(member({ discordId: "d1" }))]));
+    const run = await runDiamondsSweep(env, TIMELINE, POLICY, new Date("2028-12-20T12:00:00Z"));
+    expect(run.renewals).toBe(1);
+  });
+
+  /**
+   * Withdrawing takes you off the audition, not out of Diamonds. The round
+   * reminders stop; the one about your membership doesn't.
+   */
+  it("still warns a member who dropped their re-audition", async () => {
+    const { env } = envWith(
+      Object.fromEntries([seed(member({ withdrawnAt: "2028-06-01T00:00:00.000Z" }))]),
+    );
+    const run = await runDiamondsSweep(env, TIMELINE, POLICY, new Date("2028-12-20T12:00:00Z"));
+    expect(run).toEqual({ ...quiet, renewals: 1 });
+  });
+
+  it("stops the round reminders for someone who withdrew", async () => {
+    const { env } = envWith(
+      Object.fromEntries([
+        seed(
+          dancer({
+            withdrawnAt: "2028-06-01T00:00:00.000Z",
+            rounds: {
+              0: zeroPassed(),
+              1: {
+                assignedPiece: "https://piece",
+                // A window closing tomorrow, which would otherwise be reminded.
+                windowOpenedAt: "2028-12-18T12:00:00.000Z",
+              },
+            },
+            ...sealed,
+            document: feedbackSent(),
+          }),
+        ),
+      ]),
+    );
+    const run = await runDiamondsSweep(env, TIMELINE, POLICY, new Date("2028-12-20T12:00:00Z"));
+    expect(run).toEqual(quiet);
+    expect(sendDirectMessage).not.toHaveBeenCalled();
+  });
+
+  /** Dropping it costs them nothing that membership depends on. */
+  it("keeps the membership through a withdrawal", async () => {
+    const { env } = envWith(Object.fromEntries([seed(member())]));
+    await withdraw(env, "100");
+    const stored = (await getRecord(env, "100"))!;
+    expect(stored.memberSince).toBe("2027-11-15T00:00:00.000Z");
+    expect(stored.enforcedAt).toBe("2029-01-01T05:00:00.000Z");
+  });
+});
+
+/**
+ * The only thing in this system that changes something outside the bot, and the
+ * reason it runs daily rather than twice a year: with nine to fifteen months and
+ * three warnings, reaching the date at all is rare, so this is a trickle of at
+ * most a person or two rather than a mass event needing a dry run.
+ */
+describe("membership running out", () => {
+  const ROLE = { "config:role.diamonds": "role-diamonds" };
+
+  const member = (over: Partial<DiamondsRecord> = {}): DiamondsRecord =>
+    dancer({
+      rounds: { 0: zeroPassed(), 2: { resultSentAt: "2027-11-15T00:00:00.000Z", outcome: "passed" } },
+      document: feedbackSent(),
+      memberSince: "2027-11-15T00:00:00.000Z",
+      enforcedAt: "2029-01-01T05:00:00.000Z",
+      renewalNoticedAt: { "60": "x", "30": "y", "20": "z" },
+      ...over,
+    });
+
+  const AFTER = new Date("2029-01-01T12:00:00Z");
+
+  it("takes the role off, records it, and tells them", async () => {
+    const { env } = envWith({ ...ROLE, ...Object.fromEntries([seed(member())]) });
+    const run = await runDiamondsSweep(env, TIMELINE, POLICY, AFTER);
+
+    expect(run.lapsed).toBe(1);
+    expect(removeRole).toHaveBeenCalledWith(
+      expect.anything(),
+      "g-dance",
+      "100",
+      "role-diamonds",
+    );
+    expect(String(sendDirectMessage.mock.calls[0]?.[2]?.content)).toMatch(
+      /membership has ended/,
+    );
+  });
+
+  it("clears the membership and keeps the fact", async () => {
+    const { env } = envWith({ ...ROLE, ...Object.fromEntries([seed(member())]) });
+    await runDiamondsSweep(env, TIMELINE, POLICY, AFTER);
+
+    const stored = (await getRecord(env, "100"))!;
+    expect(stored.lapsedAt).toBe(AFTER.toISOString());
+    expect(stored.memberSince).toBeUndefined();
+    expect(stored.enforcedAt).toBeUndefined();
+    expect(stored.renewalNoticedAt).toBeUndefined();
+  });
+
+  /** Never silent: a role coming off somebody is something the directors hear. */
+  it("tells the directors every time", async () => {
+    const { env } = envWith({ ...ROLE, ...Object.fromEntries([seed(member())]) });
+    await runDiamondsSweep(env, TIMELINE, POLICY, AFTER);
+    expect(String(alertDirectors.mock.calls[0]?.[1])).toMatch(/has come off Diamonds/);
+  });
+
+  it("does it once", async () => {
+    const { env } = envWith({ ...ROLE, ...Object.fromEntries([seed(member())]) });
+    await runDiamondsSweep(env, TIMELINE, POLICY, AFTER);
+    removeRole.mockClear();
+
+    const again = await runDiamondsSweep(env, TIMELINE, POLICY, new Date("2029-01-02T12:00:00Z"));
+    expect(again.lapsed).toBe(0);
+    expect(removeRole).not.toHaveBeenCalled();
+  });
+
+  it("leaves a membership that hasn't run out alone", async () => {
+    const { env } = envWith({ ...ROLE, ...Object.fromEntries([seed(member())]) });
+    const run = await runDiamondsSweep(env, TIMELINE, POLICY, new Date("2028-12-31T12:00:00Z"));
+    expect(run.lapsed).toBe(0);
+    expect(removeRole).not.toHaveBeenCalled();
+  });
+
+  /** This is the case the directors asked for in so many words. */
+  it("revokes a member who dropped a re-audition and never picked it up", async () => {
+    const { env } = envWith({
+      ...ROLE,
+      ...Object.fromEntries([seed(member({ withdrawnAt: "2028-12-05T00:00:00.000Z" }))]),
+    });
+    const run = await runDiamondsSweep(env, TIMELINE, POLICY, AFTER);
+    expect(run.lapsed).toBe(1);
+    expect((await getRecord(env, "100"))?.lapsedAt).toBeTruthy();
+  });
+
+  it("never revokes a director", async () => {
+    const { env } = envWith({
+      ...ROLE,
+      ...Object.fromEntries([seed(member({ discordId: "d1" }))]),
+    });
+    const run = await runDiamondsSweep(env, TIMELINE, POLICY, AFTER, DIRECTORS);
+    expect(run.lapsed).toBe(0);
+    expect(removeRole).not.toHaveBeenCalled();
+  });
+
+  /**
+   * Fails closed, both ways. A record marked revoked while the role stayed on
+   * is the one failure here that nobody would ever notice.
+   */
+  it("records nothing when no role is configured", async () => {
+    const { env } = envWith(Object.fromEntries([seed(member())]));
+    const run = await runDiamondsSweep(env, TIMELINE, POLICY, AFTER);
+
+    expect(run).toEqual({ ...quiet, blocked: 1 });
+    expect((await getRecord(env, "100"))?.lapsedAt).toBeUndefined();
+    expect((await getRecord(env, "100"))?.enforcedAt).toBe("2029-01-01T05:00:00.000Z");
+  });
+
+  it("records nothing when Discord refuses the removal", async () => {
+    const { env } = envWith({ ...ROLE, ...Object.fromEntries([seed(member())]) });
+    removeRole.mockRejectedValueOnce(new Error("missing permissions"));
+
+    const run = await runDiamondsSweep(env, TIMELINE, POLICY, AFTER);
+    expect(run).toEqual({ ...quiet, blocked: 1 });
+    expect((await getRecord(env, "100"))?.lapsedAt).toBeUndefined();
+  });
+
+  /**
+   * The DM comes after the role and cannot stop it — a membership that could
+   * only end if the person were reachable would make closed DMs a way to stay a
+   * Diamond for ever.
+   */
+  it("still revokes someone it can't reach, and says so", async () => {
+    const { env } = envWith({ ...ROLE, ...Object.fromEntries([seed(member())]) });
+    sendDirectMessage.mockResolvedValueOnce(false);
+
+    const run = await runDiamondsSweep(env, TIMELINE, POLICY, AFTER);
+    expect(run.lapsed).toBe(1);
+    expect((await getRecord(env, "100"))?.lapsedAt).toBeTruthy();
+    expect(String(alertDirectors.mock.calls[0]?.[1])).toMatch(/Couldn't DM/);
+  });
+});
+
+/**
+ * The wait after an audition that didn't pass, at the door it is enforced at.
+ */
+describe("registering inside the wait", () => {
+  const failed = (over: Partial<DiamondsRecord> = {}): DiamondsRecord =>
+    dancer({
+      rounds: {
+        0: zeroPassed(),
+        1: { submittedAt: "a", resultSentAt: "2026-11-20T00:00:00.000Z", outcome: "practice" },
+      },
+      ...sealed,
+      document: feedbackSent(),
+      ...over,
+    });
+
+  it("refuses, and says when they can", async () => {
+    const { env } = envWith(Object.fromEntries([seed(failed())]));
+    const result = await register(
+      env, "100", "Ada", "new", undefined, TIMELINE, POLICY,
+      new Date("2027-01-10T12:00:00Z"),
+    );
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.reason).toMatch(/6-month wait/);
+    expect(result.ok === false && result.reason).toMatch(/ask a director/i);
+  });
+
+  it("lets them in once it's run out", async () => {
+    const { env } = envWith(Object.fromEntries([seed(failed())]));
+    const result = await register(
+      env, "100", "Ada", "new", undefined, TIMELINE, POLICY,
+      new Date("2027-05-21T12:00:00Z"),
+    );
+    expect(result.ok).toBe(true);
+    expect((await getRecord(env, "100"))?.history).toHaveLength(1);
+  });
+
+  /** Checked before the archive, which is what would hide the audition it counts from. */
+  it("doesn't archive the audition it's counted from", async () => {
+    const { env } = envWith(Object.fromEntries([seed(failed())]));
+    await register(
+      env, "100", "Ada", "new", undefined, TIMELINE, POLICY,
+      new Date("2027-01-10T12:00:00Z"),
+    );
+    const stored = (await getRecord(env, "100"))!;
+    expect(stored.history).toBeUndefined();
+    expect(roundOf(stored, 1).outcome).toBe("practice");
+  });
+
+  /** The refusal routes a judgement to the two people entitled to make it. */
+  it("lets a director put them on the list anyway", async () => {
+    const { env } = envWith(Object.fromEntries([seed(failed())]));
+    const result = await addEntry(
+      env, "100", "new", 0, TIMELINE, POLICY, new Date("2027-01-10T12:00:00Z"),
+    );
+    expect(result.ok).toBe(true);
+    const stored = (await getRecord(env, "100"))!;
+    expect(stored.history).toHaveLength(1);
+    expect(stored.rounds).toEqual({});
+  });
+
+  /**
+   * The exploit this closes: withdraw before the result, keep the record clean,
+   * register again next week.
+   */
+  it("holds someone who dropped out to the same wait", async () => {
+    const { env } = envWith(
+      Object.fromEntries([
+        seed(
+          dancer({
+            rounds: { 0: zeroPassed(), 1: { assignedPiece: "https://piece" } },
+            ...sealed,
+            document: feedbackSent(),
+            withdrawnAt: "2026-12-01T00:00:00.000Z",
+          }),
+        ),
+      ]),
+    );
+    const soon = await register(
+      env, "100", "Ada", "new", undefined, TIMELINE, POLICY,
+      new Date("2026-12-02T12:00:00Z"),
+    );
+    expect(soon.ok).toBe(false);
+
+    const later = await register(
+      env, "100", "Ada", "new", undefined, TIMELINE, POLICY,
+      new Date("2027-06-02T12:00:00Z"),
+    );
+    expect(later.ok).toBe(true);
+    // And it starts a new audition rather than resuming the dropped one.
+    expect((await getRecord(env, "100"))?.rounds).toEqual({});
+    expect((await getRecord(env, "100"))?.history).toHaveLength(1);
+    expect((await getRecord(env, "100"))?.cohort).toBe("new");
+  });
+
+  it("tells them the date on their status without making them try", async () => {
+    const stored = failed();
+    expect(statusPanel(stored, 1, CTX, new Date("2027-01-10T12:00:00Z")).content).toMatch(
+      /register again from/,
+    );
+  });
+});
+
+/**
+ * Grandfathering. The roster predates the bot: there are Diamonds whose
+ * audition happened in a room, and until somebody writes their date down they
+ * are invisible to all of this.
+ */
+describe("granting a membership", () => {
+  const NOW = new Date("2026-11-20T12:00:00Z");
+
+  it("records a date with no audition behind it", async () => {
+    const { env } = envWith();
+    const result = await grantMembership(env, "200", "Jo", "2028-07-01T23:59:00.000Z", NOW);
+    expect(result.ok).toBe(true);
+
+    const stored = (await getRecord(env, "200"))!;
+    expect(stored.enforcedAt).toBe("2028-07-01T23:59:00.000Z");
+    expect(stored.memberSince).toBe(NOW.toISOString());
+    expect(stored.rounds).toEqual({});
+    expect(stored.cohort).toBe("returning");
+  });
+
+  it("derives the date from today when none is given", async () => {
+    const { env } = envWith();
+    await grantMembership(env, "200", "Jo", undefined, NOW);
+    // November, so the January two years out.
+    expect((await getRecord(env, "200"))?.enforcedAt).toBe("2028-01-01T05:00:00.000Z");
+  });
+
+  it("tells them, since a date nobody knows about is no use", async () => {
+    const { env } = envWith();
+    await grantMembership(env, "200", "Jo", undefined, NOW);
+    expect(String(sendDirectMessage.mock.calls[0]?.[2]?.content)).toMatch(/on the books until/);
+  });
+
+  it("starts them on the notice ladder", async () => {
+    const { env } = envWith();
+    await grantMembership(env, "200", "Jo", "2026-12-20T23:59:00.000Z", NOW);
+    const run = await runDiamondsSweep(env, TIMELINE, POLICY, new Date("2026-12-05T12:00:00Z"));
+    expect(run.renewals).toBe(1);
+  });
+
+  /**
+   * The two mistakes aren't symmetrical: refusing to shorten a membership costs
+   * a conversation, and silently shortening one costs somebody their place.
+   */
+  it("won't guess a new date over one somebody earned", async () => {
+    const { env } = envWith(
+      Object.fromEntries([
+        seed(dancer({ memberSince: "2026-01-01T00:00:00.000Z", enforcedAt: "2027-07-01T04:00:00.000Z" })),
+      ]),
+    );
+    const result = await grantMembership(env, "100", "Ada", undefined, NOW);
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.reason).toMatch(/already a member/);
+    expect((await getRecord(env, "100"))?.enforcedAt).toBe("2027-07-01T04:00:00.000Z");
+  });
+
+  it("will move it when the date is given explicitly", async () => {
+    const { env } = envWith(
+      Object.fromEntries([
+        seed(dancer({ memberSince: "2026-01-01T00:00:00.000Z", enforcedAt: "2027-07-01T04:00:00.000Z" })),
+      ]),
+    );
+    const result = await grantMembership(env, "100", "Ada", "2029-01-01T23:59:00.000Z", NOW);
+    expect(result.ok).toBe(true);
+    expect((await getRecord(env, "100"))?.enforcedAt).toBe("2029-01-01T23:59:00.000Z");
+  });
+
+  it("refuses a date that has already gone", async () => {
+    const { env } = envWith();
+    const result = await grantMembership(env, "200", "Jo", "2026-01-01T23:59:00.000Z", NOW);
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.reason).toMatch(/already passed/);
+  });
+
+  /** Granting after a lapse is how somebody is put back. */
+  it("clears a lapse and the old ladder", async () => {
+    const { env } = envWith(
+      Object.fromEntries([
+        seed(
+          dancer({
+            lapsedAt: "2026-01-01T00:00:00.000Z",
+            renewalNoticedAt: { "20": "x" },
+          }),
+        ),
+      ]),
+    );
+    await grantMembership(env, "100", "Ada", "2028-07-01T23:59:00.000Z", NOW);
+    const stored = (await getRecord(env, "100"))!;
+    expect(stored.lapsedAt).toBeUndefined();
+    expect(stored.renewalNoticedAt).toBeUndefined();
+  });
+});
+
+/**
+ * The decision the directors made out loud: a member who fails a renewal is out
+ * at their date, and can try again six months after the failure.
+ *
+ * Written as one sequence rather than four unit tests because it is not one
+ * rule — it's the enforcement date, the retry wait, the lapse and the cohort
+ * reset interacting, and each of them was decided separately. This is the test
+ * that fails if any one of them moves.
+ */
+describe("a failed renewal, start to finish", () => {
+  const ROLE = { "config:role.diamonds": "role-diamonds" };
+
+  /** A Diamond since Nov 2027 whose renewal didn't advance at Round 1. */
+  const seeded = () =>
+    dancer({
+      cohort: "returning",
+      registeredAt: "2028-09-01T00:00:00.000Z",
+      rounds: {
+        0: {
+          resultSentAt: "2028-09-10T00:00:00.000Z",
+          outcome: "passed",
+          ballots: {
+            d1: { verdict: "pass" as const, at: "2028-09-09T00:00:00.000Z" },
+            d2: { verdict: "pass" as const, at: "2028-09-09T00:00:00.000Z" },
+          },
+        },
+        1: {
+          submittedAt: "2028-10-15T00:00:00.000Z",
+          resultSentAt: "2028-10-20T00:00:00.000Z",
+          outcome: "practice",
+        },
+      },
+      document: feedbackSent("2028-09-10T00:00:00.000Z"),
+      ...sealed,
+      memberSince: "2027-11-15T00:00:00.000Z",
+      enforcedAt: "2029-01-01T05:00:00.000Z",
+      history: [{ rounds: {}, outcome: "passed" as const, finishedAt: "2027-11-15T00:00:00.000Z" }],
+    });
+
+  it("warns them that the wait outruns their date, and points at a director", async () => {
+    const { env } = envWith({ ...ROLE, ...Object.fromEntries([seed(seeded())]) });
+    const run = await runDiamondsSweep(env, TIMELINE, POLICY, new Date("2028-12-20T12:00:00Z"));
+
+    expect(run.renewals).toBe(1);
+    const sent = String(sendDirectMessage.mock.calls[0]?.[2]?.content);
+    expect(sent).toMatch(/can't re-audition before/);
+    expect(sent).toMatch(/Talk to a director/);
+    // Never tells them to do the thing they are barred from doing.
+    expect(sent).not.toMatch(/re-audition before then and it renews/);
+  });
+
+  it("takes the role off on their date", async () => {
+    const { env } = envWith({ ...ROLE, ...Object.fromEntries([seed(seeded())]) });
+    const run = await runDiamondsSweep(env, TIMELINE, POLICY, new Date("2029-01-01T12:00:00Z"));
+
+    expect(run.lapsed).toBe(1);
+    expect(removeRole).toHaveBeenCalledWith(expect.anything(), "g-dance", "100", "role-diamonds");
+    expect((await getRecord(env, "100"))?.enforcedAt).toBeUndefined();
+  });
+
+  it("won't let them back before six months from the failure", async () => {
+    const { env } = envWith({ ...ROLE, ...Object.fromEntries([seed(seeded())]) });
+    await runDiamondsSweep(env, TIMELINE, POLICY, new Date("2029-01-01T12:00:00Z"));
+
+    const early = await register(
+      env, "100", "Ada", "new", undefined, TIMELINE, POLICY,
+      new Date("2029-02-01T12:00:00Z"),
+    );
+    expect(early.ok).toBe(false);
+    expect(early.ok === false && early.reason).toMatch(/6-month wait/);
+  });
+
+  /** Six months from the result, which was 20 October. */
+  it("lets them back after it, owing a cover", async () => {
+    const { env } = envWith({ ...ROLE, ...Object.fromEntries([seed(seeded())]) });
+    await runDiamondsSweep(env, TIMELINE, POLICY, new Date("2029-01-01T12:00:00Z"));
+
+    const back = await register(
+      env, "100", "Ada", "new", undefined, TIMELINE, POLICY,
+      new Date("2029-04-21T12:00:00Z"),
+    );
+    expect(back.ok).toBe(true);
+
+    const stored = (await getRecord(env, "100"))!;
+    expect(stored.rounds).toEqual({});
+    expect(stored.history).toHaveLength(2);
+    // Failed, so a newcomer again: this time they owe us a cover.
+    expect(stored.cohort).toBe("new");
+    expect(stored.memberSince).toBeUndefined();
+  });
+
+  /**
+   * The wait is six months from the failure, not "never again before your
+   * date" — so a renewal that fails early enough leaves room to try again
+   * before the date, and that is deliberate.
+   */
+  it("leaves room for another go when the failure lands early", async () => {
+    const early = dancer({
+      ...seeded(),
+      rounds: {
+        ...seeded().rounds,
+        1: {
+          submittedAt: "2028-02-10T00:00:00.000Z",
+          resultSentAt: "2028-02-15T00:00:00.000Z",
+          outcome: "practice",
+        },
+      },
+    });
+    const { env } = envWith({ ...ROLE, ...Object.fromEntries([seed(early)]) });
+
+    const back = await register(
+      env, "100", "Ada", "new", undefined, TIMELINE, POLICY,
+      new Date("2028-08-16T12:00:00Z"),
+    );
+    expect(back.ok).toBe(true);
+    // Still a member, with the same date — they have until January to pass.
+    expect((await getRecord(env, "100"))?.enforcedAt).toBe("2029-01-01T05:00:00.000Z");
   });
 });
 
@@ -457,7 +1743,7 @@ describe("starting a window", () => {
   it("runs cover -> score -> feedback -> piece -> start, in that order", async () => {
     const { env } = envWith();
     const joined = new Date("2026-11-16T10:00:00Z");
-    await register(env, "100", "Ada", "new", undefined, TIMELINE, joined);
+    await register(env, "100", "Ada", "new", undefined, TIMELINE, POLICY, joined);
     await submit(env, "100", 0, "https://cover", TIMELINE, POLICY, joined);
 
     const doc = {

@@ -11,8 +11,7 @@
     "register": "tsx scripts/register-commands.ts",
     "doctor": "tsx scripts/doctor.ts",
     "columns": "tsx scripts/columns.ts",
-    "clear-auditions": "tsx scripts/clear-auditions.ts",
-    "diamonds": "tsx scripts/diamonds-schedule.ts"
+    "clear-auditions": "tsx scripts/clear-auditions.ts"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20250620.0",

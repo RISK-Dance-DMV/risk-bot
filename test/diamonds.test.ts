@@ -42,6 +42,16 @@ import {
   type RoundRecord,
   type Scores,
   type Verdict,
+  parseScore,
+  daysUntil,
+  enforcementFor,
+  noticeDue,
+  renewalUnderway,
+  auditionFinished,
+  auditionNumber,
+  reAudition,
+  retryBlocked,
+  retryBlockedUntil,
 } from "../src/diamonds/audition";
 
 /** The settled policy numbers, from DIAMONDS-RUBRIC.md. Passed, never imported. */
@@ -1069,5 +1079,498 @@ describe("what a ballot has to carry", () => {
     const scored = ballotComplete(0, { scores: scores(), targetScore: 4, at: "x" });
     expect(scored.ok).toBe(false);
     if (!scored.ok) expect(scored.reason).toMatch(/pass or a fail/);
+  });
+});
+
+/**
+ * The one place a score arrives as text. Discord has no number input, so a
+ * modal ballot is a string, and the failure that matters is silent: `Number("")`
+ * is 0 and 0 is a real score.
+ */
+describe("a score off a form", () => {
+  it("takes a number on the ladder, whole or half", () => {
+    expect(parseScore("7")).toBe(7);
+    expect(parseScore("7.5")).toBe(7.5);
+    expect(parseScore(" 10 ")).toBe(10);
+    expect(parseScore("0")).toBe(0);
+  });
+
+  it("refuses an empty box rather than calling it a zero", () => {
+    expect(parseScore("")).toBeUndefined();
+    expect(parseScore("   ")).toBeUndefined();
+  });
+
+  it("refuses what isn't a number on this ladder", () => {
+    expect(parseScore("7,5")).toBeUndefined();
+    expect(parseScore("eight")).toBeUndefined();
+    expect(parseScore("11")).toBeUndefined();
+    expect(parseScore("-1")).toBeUndefined();
+    expect(parseScore("7.5.5")).toBeUndefined();
+  });
+});
+
+/**
+ * The rule as the directors wrote it out, row for row. Kept as their own table
+ * rather than as a restatement of the implementation, because the thing most
+ * likely to go wrong here is the implementation quietly disagreeing with what
+ * was decided — and a test that derives its expectations the same way the code
+ * does would never catch it.
+ */
+describe("the enforcement date", () => {
+  const passed = (iso: string) => enforcementFor(iso).slice(0, 10);
+
+  it("sends January, February and March to the January a year out", () => {
+    expect(passed("2027-01-15T12:00:00.000Z")).toBe("2028-01-01");
+    expect(passed("2027-02-15T12:00:00.000Z")).toBe("2028-01-01");
+    expect(passed("2027-03-15T12:00:00.000Z")).toBe("2028-01-01");
+  });
+
+  it("sends April through September to the July a year out", () => {
+    expect(passed("2027-04-15T12:00:00.000Z")).toBe("2028-07-01");
+    expect(passed("2027-05-15T12:00:00.000Z")).toBe("2028-07-01");
+    expect(passed("2027-06-15T12:00:00.000Z")).toBe("2028-07-01");
+    expect(passed("2027-07-15T12:00:00.000Z")).toBe("2028-07-01");
+    expect(passed("2027-08-15T12:00:00.000Z")).toBe("2028-07-01");
+    expect(passed("2027-09-15T12:00:00.000Z")).toBe("2028-07-01");
+  });
+
+  it("sends October, November and December to the January two years out", () => {
+    expect(passed("2027-10-15T12:00:00.000Z")).toBe("2029-01-01");
+    expect(passed("2027-11-15T12:00:00.000Z")).toBe("2029-01-01");
+    expect(passed("2027-12-15T12:00:00.000Z")).toBe("2029-01-01");
+  });
+
+  /** October and the following March are one window, so they share a date. */
+  it("puts October and the following February on the same date", () => {
+    expect(passed("2027-10-01T12:00:00.000Z")).toBe(passed("2028-02-01T12:00:00.000Z"));
+  });
+
+  it("never gives less than nine months or more than fifteen", () => {
+    for (const month of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]) {
+      const iso = `2027-${String(month).padStart(2, "0")}-28T12:00:00.000Z`;
+      const months =
+        (new Date(enforcementFor(iso)).getTime() - new Date(iso).getTime()) /
+        (30.44 * 24 * 60 * 60 * 1000);
+      expect(months).toBeGreaterThanOrEqual(9);
+      expect(months).toBeLessThanOrEqual(15);
+    }
+  });
+
+  /**
+   * Built at midnight Eastern rather than midnight UTC, so that the date a New
+   * York reader sees is the date the rule names.
+   */
+  it("lands on the first of the month, not the evening before", () => {
+    expect(enforcementFor("2027-11-15T12:00:00.000Z")).toBe("2029-01-01T05:00:00.000Z");
+    expect(enforcementFor("2027-05-15T12:00:00.000Z")).toBe("2028-07-01T04:00:00.000Z");
+  });
+
+  /**
+   * The property the "re-audition whenever you like" policy rests on: going
+   * again can never hand you an earlier date than the one you already have, so
+   * there is no month in which waiting is worth more than going, and nothing
+   * for the bot to protect people from.
+   */
+  it("never moves anyone's date backwards", () => {
+    let previous = 0;
+    for (let month = 0; month < 36; month += 1) {
+      const iso = new Date(Date.UTC(2027, month, 15)).toISOString();
+      const date = new Date(enforcementFor(iso)).getTime();
+      expect(date).toBeGreaterThanOrEqual(previous);
+      previous = date;
+    }
+  });
+
+  /** Going early in your half is worth five months, which is the incentive. */
+  it("pays for auditioning early in the window", () => {
+    const early = new Date(enforcementFor("2027-10-01T12:00:00.000Z")).getTime() -
+      new Date("2027-10-01T12:00:00.000Z").getTime();
+    const late = new Date(enforcementFor("2028-03-01T12:00:00.000Z")).getTime() -
+      new Date("2028-03-01T12:00:00.000Z").getTime();
+    expect(early).toBeGreaterThan(late);
+  });
+});
+
+/**
+ * What a member is told when they come back and look.
+ */
+describe("after the process is finished", () => {
+  const passed: DiamondsRecord = {
+    discordId: "100",
+    cohort: "new",
+    rounds: {
+      0: { submittedAt: "2027-11-01T00:00:00.000Z", resultSentAt: "2027-11-02T00:00:00.000Z", outcome: "passed" },
+      1: { submittedAt: "2027-11-05T00:00:00.000Z", resultSentAt: "2027-11-08T00:00:00.000Z", outcome: "advanced" },
+      2: { submittedAt: "2027-11-12T00:00:00.000Z", resultSentAt: "2027-11-15T00:00:00.000Z", outcome: "passed" },
+    },
+    memberSince: "2027-11-15T00:00:00.000Z",
+    enforcedAt: "2029-01-01T05:00:00.000Z",
+  };
+
+  /**
+   * The bug this replaces: keyed on having submitted Round 2, a member who
+   * passed a year ago was told "waiting on your result — nothing to do".
+   */
+  it("tells someone who passed that they're done and can go again", () => {
+    const state = activeRound(passed, at("2028-06-01T00:00:00.000Z"));
+    expect(state.ok).toBe(false);
+    expect(state.ok === false && state.reason).toMatch(/You're a Diamond/);
+    expect(state.ok === false && state.reason).toMatch(/whenever you like/);
+    expect(state.ok === false && state.reason).not.toMatch(/[Ww]aiting/);
+  });
+
+  it("still says 'waiting' to someone whose result hasn't been sent", () => {
+    const pending: DiamondsRecord = {
+      ...passed,
+      rounds: { ...passed.rounds, 2: { submittedAt: "2027-11-12T00:00:00.000Z" } },
+    };
+    const state = activeRound(pending, at("2027-11-13T00:00:00.000Z"));
+    expect(state.ok === false && state.reason).toMatch(/Waiting on your result/);
+  });
+
+  it("doesn't dress up a Round 2 failure as membership", () => {
+    const failed: DiamondsRecord = {
+      ...passed,
+      rounds: { ...passed.rounds, 2: { ...passed.rounds[2]!, outcome: "failed" } },
+      memberSince: undefined,
+      enforcedAt: undefined,
+    };
+    const state = activeRound(failed, at("2028-06-01T00:00:00.000Z"));
+    expect(state.ok === false && state.reason).toMatch(/finished at Round 2/);
+  });
+});
+
+describe("the renewal ladder", () => {
+  const LADDER = [20, 30, 60];
+  const member = (over: Partial<DiamondsRecord> = {}): DiamondsRecord => ({
+    discordId: "100",
+    cohort: "new",
+    rounds: {},
+    memberSince: "2027-11-15T00:00:00.000Z",
+    enforcedAt: "2029-01-01T05:00:00.000Z",
+    ...over,
+  });
+
+  it("says nothing while the date is further off than the widest rung", () => {
+    expect(noticeDue(member(), LADDER, new Date("2028-10-01T12:00:00Z"))).toBeUndefined();
+  });
+
+  it("sends the two-month rung when two months are left", () => {
+    const due = noticeDue(member(), LADDER, new Date("2028-11-05T12:00:00Z"));
+    expect(due?.rung).toBe(60);
+    expect(due?.daysLeft).toBeLessThanOrEqual(60);
+  });
+
+  /**
+   * The failure this prevents: a sweep that was down for a fortnight, or a
+   * member whose urgent notice went out first, receiving the gentle sixty-day
+   * one afterwards.
+   */
+  it("sends only the most urgent rung reached, and answers for the rest", () => {
+    const due = noticeDue(member(), LADDER, new Date("2028-12-20T12:00:00Z"));
+    expect(due?.rung).toBe(20);
+    expect(due?.covers).toEqual([20, 30, 60]);
+  });
+
+  it("doesn't send a rung twice", () => {
+    const sent = member({ renewalNoticedAt: { "20": "2028-12-20T12:00:00.000Z" } });
+    expect(noticeDue(sent, LADDER, new Date("2028-12-21T12:00:00Z"))).toBeUndefined();
+  });
+
+  it("still sends the urgent rung to someone who only had the gentle one", () => {
+    const sent = member({ renewalNoticedAt: { "60": "2028-11-05T12:00:00.000Z" } });
+    expect(noticeDue(sent, LADDER, new Date("2028-12-20T12:00:00Z"))?.rung).toBe(20);
+  });
+
+  /** Past the date is the removal job's business. A fourth warning isn't it. */
+  it("stops once the date has gone", () => {
+    expect(noticeDue(member(), LADDER, new Date("2029-01-02T12:00:00Z"))).toBeUndefined();
+  });
+
+  it("says nothing to someone with no membership to renew", () => {
+    expect(
+      noticeDue(member({ enforcedAt: undefined }), LADDER, new Date("2028-12-20T12:00:00Z")),
+    ).toBeUndefined();
+  });
+
+  /**
+   * Withdrawing leaves the audition, not Diamonds — and a member who dropped a
+   * re-audition is the likeliest person in the system to reach their date, so
+   * silence is exactly what would take them there.
+   */
+  it("still warns a member who dropped their re-audition", () => {
+    const dropped = member({ withdrawnAt: "2028-12-01T00:00:00.000Z" });
+    expect(noticeDue(dropped, LADDER, new Date("2028-12-20T12:00:00Z"))?.rung).toBe(20);
+  });
+
+  /**
+   * Nobody mid-re-audition gets told they're about to be removed — they are
+   * doing the thing the notice asks for.
+   */
+  it("goes quiet while a re-audition is in flight", () => {
+    const going = member({
+      rounds: { 0: { submittedAt: "2028-12-01T00:00:00.000Z" } },
+    });
+    expect(renewalUnderway(going)).toBe(true);
+    expect(noticeDue(going, LADDER, new Date("2028-12-20T12:00:00Z"))).toBeUndefined();
+  });
+
+  it("doesn't count the audition they joined on as a re-audition", () => {
+    const joined = member({
+      rounds: { 2: { submittedAt: "2027-11-01T00:00:00.000Z", resultSentAt: "2027-11-15T00:00:00.000Z" } },
+    });
+    expect(renewalUnderway(joined)).toBe(false);
+  });
+
+  it("counts whole days, so most of today still counts", () => {
+    expect(daysUntil("2029-01-01T05:00:00.000Z", new Date("2028-12-31T20:00:00Z"))).toBe(1);
+  });
+
+  /**
+   * `daysUntil` rounds up, so the afternoon of the date itself comes back as 0
+   * rather than negative — which a `< 0` guard would have read as "still time"
+   * and answered with a notice saying no days remained.
+   */
+  it("says nothing on the afternoon of the date itself", () => {
+    // Negative zero, precisely: `Math.ceil(-0.6)` is `-0`, and `-0 < 0` is false.
+    // That is the whole reason the guard compares instants instead.
+    expect(daysUntil("2029-01-01T05:00:00.000Z", new Date("2029-01-01T20:00:00Z"))).toBe(-0);
+    expect(noticeDue(member(), LADDER, new Date("2029-01-01T20:00:00Z"))).toBeUndefined();
+  });
+});
+
+describe("starting again", () => {
+  const done = (over: Partial<DiamondsRecord> = {}): DiamondsRecord => ({
+    discordId: "100",
+    cohort: "new",
+    registeredAt: "2027-10-01T00:00:00.000Z",
+    rounds: {
+      0: { submittedAt: "2027-11-01T00:00:00.000Z", resultSentAt: "2027-11-02T00:00:00.000Z", outcome: "passed" },
+      1: { submittedAt: "2027-11-05T00:00:00.000Z", resultSentAt: "2027-11-08T00:00:00.000Z", outcome: "advanced" },
+      2: { submittedAt: "2027-11-12T00:00:00.000Z", resultSentAt: "2027-11-15T00:00:00.000Z", outcome: "passed" },
+    },
+    target: "elbows collapse on extensions",
+    targetBefore: 4,
+    targetFixedAt: "2027-11-03T00:00:00.000Z",
+    document: {
+      content: "A good season.",
+      strengths: ["a", "b", "c"],
+      growthAreas: ["arms"],
+      writtenBy: "d1",
+      submittedAt: "2027-11-02T00:00:00.000Z",
+      deliveredAt: "2027-11-02T00:00:00.000Z",
+    },
+    memberSince: "2027-11-15T00:00:00.000Z",
+    enforcedAt: "2029-01-01T05:00:00.000Z",
+    ...over,
+  });
+
+  const NOW = "2028-11-01T00:00:00.000Z";
+
+  it("puts the finished audition on file and hands back a clean one", () => {
+    const again = reAudition(done(), NOW);
+    expect(again.ok).toBe(true);
+    if (!again.ok) return;
+
+    expect(again.record.rounds).toEqual({});
+    expect(again.record.history).toHaveLength(1);
+    expect(again.record.history?.[0]?.outcome).toBe("passed");
+    expect(again.record.history?.[0]?.rounds[2]?.submissionUrl).toBeUndefined();
+    expect(again.record.history?.[0]?.target).toBe("elbows collapse on extensions");
+    expect(auditionNumber(again.record)).toBe(2);
+  });
+
+  /**
+   * The three that hang off the record rather than off `rounds`, and so are the
+   * easy ones to leave behind.
+   */
+  it("clears the target, its number and the document", () => {
+    const again = reAudition(done(), NOW);
+    expect(again.ok && again.record.target).toBeUndefined();
+    expect(again.ok && again.record.targetBefore).toBeUndefined();
+    // Left behind, `fixTarget` would refuse the new Round 1's target.
+    expect(again.ok && again.record.targetFixedAt).toBeUndefined();
+    // Left behind, the new Round 0 document would overwrite last year's result.
+    expect(again.ok && again.record.document).toBeUndefined();
+  });
+
+  it("keeps the membership, which belongs to the term and not the audition", () => {
+    const again = reAudition(done(), NOW);
+    expect(again.ok && again.record.memberSince).toBe("2027-11-15T00:00:00.000Z");
+    expect(again.ok && again.record.enforcedAt).toBe("2029-01-01T05:00:00.000Z");
+  });
+
+  /**
+   * Cleared on the pass, where the date moves — not here. Clearing it here
+   * would silence the ladder for anyone who started a re-audition and stopped.
+   */
+  it("leaves the notice markers alone", () => {
+    const marked = done({ renewalNoticedAt: { "60": "2028-11-01T00:00:00.000Z" } });
+    const again = reAudition(marked, NOW);
+    expect(again.ok && again.record.renewalNoticedAt).toEqual({
+      "60": "2028-11-01T00:00:00.000Z",
+    });
+  });
+
+  it("makes a renewing member returning, so they owe no cover", () => {
+    const again = reAudition(done(), NOW);
+    expect(again.ok && again.record.cohort).toBe("returning");
+    expect(again.ok && roundToScore(again.record, 2)).toBe(0);
+  });
+
+  /** Nobody has watched them do anything since, so they owe one again. */
+  it("sends someone who didn't pass back to being a newcomer", () => {
+    const failed = done({
+      cohort: "new",
+      rounds: {
+        ...done().rounds,
+        2: { ...done().rounds[2]!, outcome: "failed" },
+      },
+      memberSince: undefined,
+      enforcedAt: undefined,
+    });
+    const again = reAudition(failed, NOW);
+    expect(again.ok && again.record.cohort).toBe("new");
+  });
+
+  it("restarts the clock Round 1's gap counts from", () => {
+    const again = reAudition(done(), NOW);
+    expect(again.ok && again.record.registeredAt).toBe(NOW);
+  });
+
+  it("puts them back at Round 0", () => {
+    const again = reAudition(done(), NOW);
+    expect(again.ok && activeRound(again.record, at(NOW))).toEqual({ ok: true, round: 0 });
+  });
+
+  it("refuses while the audition is still going", () => {
+    const midway = done({
+      rounds: { 0: done().rounds[0]!, 1: { assignedPiece: "https://p" } },
+      memberSince: undefined,
+      enforcedAt: undefined,
+    });
+    const again = reAudition(midway, NOW);
+    expect(again.ok).toBe(false);
+    expect(again.ok === false && again.reason).toMatch(/hasn't finished/);
+  });
+
+  it("refuses a record that is already at the start", () => {
+    const fresh: DiamondsRecord = { discordId: "100", cohort: "new", rounds: {} };
+    expect(reAudition(fresh, NOW).ok).toBe(false);
+  });
+
+  it("stacks, so a third audition keeps both earlier ones", () => {
+    const second = reAudition(done(), NOW);
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    const third = reAudition({ ...second.record, rounds: done().rounds }, "2029-11-01T00:00:00.000Z");
+    expect(third.ok && third.record.history).toHaveLength(2);
+    expect(third.ok && auditionNumber(third.record)).toBe(3);
+  });
+
+  /**
+   * These two decide the same thing from different angles, and a record that
+   * one called finished while the other called live would let somebody start a
+   * second audition on top of a half-finished first.
+   */
+  it("agrees with activeRound about what counts as finished", () => {
+    const cases: [string, DiamondsRecord, boolean][] = [
+      ["passed Round 2", done(), true],
+      [
+        "failed Round 2",
+        done({ rounds: { ...done().rounds, 2: { ...done().rounds[2]!, outcome: "failed" } } }),
+        true,
+      ],
+      [
+        "didn't advance at Round 1",
+        done({
+          rounds: {
+            0: done().rounds[0]!,
+            1: { submittedAt: "x", resultSentAt: "y", outcome: "practice" },
+          },
+        }),
+        true,
+      ],
+      [
+        "failed Round 0",
+        done({ rounds: { 0: { submittedAt: "x", resultSentAt: "y", outcome: "failed" } } }),
+        true,
+      ],
+      [
+        "Round 2 in with no result",
+        done({ rounds: { ...done().rounds, 2: { submittedAt: "2027-11-12T00:00:00.000Z" } } }),
+        false,
+      ],
+      ["mid Round 1", done({ rounds: { 0: done().rounds[0]!, 1: { assignedPiece: "p" } } }), false],
+    ];
+
+    for (const [name, record, finished] of cases) {
+      expect(auditionFinished(record), name).toBe(finished);
+      // Whenever it is finished, activeRound must also have nothing to offer.
+      if (finished) expect(activeRound(record, at(NOW)).ok, name).toBe(false);
+    }
+  });
+});
+
+describe("the wait after an audition that didn't pass", () => {
+  const ended = (outcome: "passed" | "failed" | "practice", round: 0 | 1 | 2): DiamondsRecord => ({
+    discordId: "100",
+    cohort: "new",
+    rounds: {
+      ...(round >= 1
+        ? { 0: { submittedAt: "a", resultSentAt: "2027-06-01T00:00:00.000Z", outcome: "passed" as const } }
+        : {}),
+      ...(round === 2
+        ? { 1: { submittedAt: "b", resultSentAt: "2027-06-10T00:00:00.000Z", outcome: "advanced" as const } }
+        : {}),
+      [round]: { submittedAt: "c", resultSentAt: "2027-06-15T00:00:00.000Z", outcome },
+    },
+  });
+
+  it("runs six months from the day the result went out", () => {
+    expect(retryBlockedUntil(ended("failed", 2), 6)?.slice(0, 10)).toBe("2027-12-15");
+  });
+
+  /** All three mean the same thing about whether they're in. */
+  it("applies at whichever round it ended", () => {
+    expect(retryBlockedUntil(ended("failed", 0), 6)).toBeTruthy();
+    expect(retryBlockedUntil(ended("practice", 1), 6)).toBeTruthy();
+    expect(retryBlockedUntil(ended("failed", 2), 6)).toBeTruthy();
+  });
+
+  it("doesn't apply to someone who passed", () => {
+    expect(retryBlockedUntil(ended("passed", 2), 6)).toBeUndefined();
+  });
+
+  /** Withdrawing is leaving, not failing — there's no judgement to wait out. */
+  it("doesn't apply to someone who withdrew part-way", () => {
+    const left: DiamondsRecord = {
+      discordId: "100",
+      cohort: "new",
+      rounds: { 0: { submittedAt: "a", resultSentAt: "x", outcome: "passed" }, 1: { assignedPiece: "p" } },
+      withdrawnAt: "2027-06-20T00:00:00.000Z",
+    };
+    expect(retryBlockedUntil(left, 6)).toBeUndefined();
+  });
+
+  it("runs out", () => {
+    const record = ended("failed", 2);
+    expect(retryBlocked(record, 6, at("2027-12-14T00:00:00.000Z"))).toBeTruthy();
+    expect(retryBlocked(record, 6, at("2027-12-16T00:00:00.000Z"))).toBeUndefined();
+  });
+
+  it("is off entirely at zero months", () => {
+    expect(retryBlockedUntil(ended("failed", 2), 0)).toBeUndefined();
+  });
+
+  /** Over rather than under: the wait should never come out shorter. */
+  it("never shortens itself on a long month", () => {
+    const august: DiamondsRecord = {
+      discordId: "100",
+      cohort: "new",
+      rounds: { 0: { submittedAt: "a", resultSentAt: "2027-08-31T00:00:00.000Z", outcome: "failed" } },
+    };
+    const until = new Date(retryBlockedUntil(august, 6)!);
+    expect(until.getTime()).toBeGreaterThan(new Date("2028-02-29T00:00:00.000Z").getTime());
   });
 });

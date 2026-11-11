@@ -27,9 +27,11 @@ import {
 import type { Env } from "../env";
 import {
   DIMENSIONS,
+  DIMENSION_LABEL,
   MAX_GROWTH_AREAS,
   MIN_STRENGTHS,
   activeRound,
+  parseScore,
   roomForThreeRounds,
   roundOf,
   composeFeedback,
@@ -70,6 +72,7 @@ import {
   fileFeedback,
   getRecord,
   grantExtension,
+  grantMembership,
   panelContext,
   noteRound,
   planStart,
@@ -80,11 +83,13 @@ import {
   submit,
   withdraw,
   type FlowResult,
+  type ScoreInput,
 } from "./flow";
 
 export const diamondsComponent = parseDiamondsCustomId;
 
 const DIRECTOR_ONLY = [
+  "grant",
   "assign",
   "assign-all",
   "extend",
@@ -347,6 +352,7 @@ async function runSubcommand(
       cohort,
       planned || undefined,
       timeline,
+      policy,
       now,
     );
     if (!result.ok) return { content: `❌ ${result.reason}` };
@@ -356,13 +362,36 @@ async function runSubcommand(
     return roundPanel(result.record, live.ok ? live.round : 0, ctx, now);
   }
 
+  // Asked rather than done. Withdrawing used to be reversible by registering
+  // again; now it starts the same wait a failed audition does, which is not
+  // something anyone should be able to do with one mistyped command.
   if (sub === "withdraw") {
-    const result = await withdraw(env, userId);
-    return said(
-      result,
-      "You're off the list. Run `/diamonds register` again if you change your mind " +
-        "while the round you'd be joining is still open.",
-    );
+    return {
+      content:
+        `⚠️ **Withdrawing starts the ${policy.retryMonths}-month wait.** Dropping ` +
+        `out counts the same as an audition that didn't go through — otherwise ` +
+        `leaving early would be a way around it — so you wouldn't be able to ` +
+        `register again for ${policy.retryMonths} months, and you'd come back ` +
+        `owing a Round 0 cover.\n\n` +
+        `If you just need more time, you don't need this: nothing expires while ` +
+        `you haven't started a window, and a director can add days to one that's ` +
+        `open. If something has gone wrong, talk to a director first — they can ` +
+        `put you back on the list inside the wait, and that's much easier than ` +
+        `undoing this.`,
+      components: [
+        {
+          type: ComponentType.ACTION_ROW,
+          components: [
+            {
+              type: ComponentType.BUTTON,
+              style: ButtonStyle.DANGER,
+              label: "Withdraw anyway",
+              custom_id: diamondsCustomId("quit", "me"),
+            },
+          ],
+        },
+      ],
+    };
   }
 
   if (sub === "status" || sub === "start") {
@@ -413,6 +442,36 @@ async function runSubcommand(
         ? "📼 **Submitted.** You can replace it any time before the Round 0 deadline."
         : "📼 **Submitted.** That's the round done — feedback either way, whether or not you advance.",
     );
+  }
+
+  if (sub === "grant") {
+    const dancer = userOption(interaction, "grant", "dancer");
+    if (!dancer) return { content: "❌ Pick who the membership is for." };
+
+    const raw = option(interaction, "grant", "until").trim();
+    if (raw && !/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+      return { content: "❌ Give the date as YYYY-MM-DD, e.g. `2028-07-01`." };
+    }
+
+    const result = await grantMembership(
+      env,
+      dancer,
+      undefined,
+      // End of that day rather than its first instant, so a date given as the
+      // last day they're covered means what it says.
+      raw ? `${raw}T23:59:00.000Z` : undefined,
+      now,
+    );
+    if (!result.ok) return { content: `❌ ${result.reason}` };
+    return {
+      content:
+        `💎 **<@${dancer}> is on the books until ` +
+        `${result.record.enforcedAt?.slice(0, 10)}.**` +
+        (result.warning ? `\n⚠️ ${result.warning}` : "") +
+        `\nThey'll get the renewal reminders from ` +
+        `${policy.noticeDays[policy.noticeDays.length - 1]} days out. No audition ` +
+        `recorded against this, which is the point of it.`,
+    };
   }
 
   if (sub === "assign") {
@@ -569,54 +628,7 @@ async function runSubcommand(
   if (sub === "result") {
     const dancer = userOption(interaction, "result", "dancer");
     if (!dancer) return { content: "❌ Pick who the result is for." };
-    const record = await getRecord(env, dancer);
-    if (!record) return { content: `❌ <@${dancer}> isn't registered.` };
-
-    const round = roundToScore(record, policy.minScores);
-    if (round === undefined || round === 0) {
-      return {
-        content:
-          round === 0
-            ? `❌ Round 0 is a baseline, not a result. Their feedback is what goes ` +
-              `out — \`/diamonds feedback\`.`
-            : `❌ Nothing of <@${dancer}>'s is waiting on a result.`,
-      };
-    }
-
-    const settled = settleRound(record, round, policy);
-    const counted = tally(roundOf(record, round), policy.minScores);
-    if (!settled) {
-      return {
-        content:
-          `❌ Round ${round} isn't settled — ${counted.count} of ${policy.minScores} ` +
-          `ballots in.`,
-      };
-    }
-
-    // Read back exactly what they'll read, then one button. This is the only
-    // irreversible step in the process, and the preview is built from the same
-    // function the DM is — built separately they would eventually disagree, and
-    // the preview would be a lie.
-    const notes = composeFeedback(roundOf(record, round), await getDirectorIds(env));
-    return {
-      content:
-        `**This is what <@${dancer}> will receive. Nothing has been sent yet.**` +
-        (notes ? "" : `\n*No director has written anything — \`/diamonds feedback\` first if you meant to.*`) +
-        `\n\n${resultMessage(record, round, settled, counted, notes, ctx, policy)}`,
-      components: [
-        {
-          type: ComponentType.ACTION_ROW,
-          components: [
-            {
-              type: ComponentType.BUTTON,
-              style: ButtonStyle.DANGER,
-              label: "Send this result",
-              custom_id: diamondsCustomId("send", dancer),
-            },
-          ],
-        },
-      ],
-    };
+    return resultPreview(env, dancer, ctx, policy);
   }
 
   if (sub === "roster") return rosterReadout(await allRecords(env), ctx, now);
@@ -640,6 +652,159 @@ export async function handleDiamondsComponent(
   }
   const userId = callerId(interaction);
   if (!userId) return json(ephemeral("Couldn't tell who pressed that."));
+
+  // Every button except the dancer's own is a director's, and those hang on a
+  // card in a channel rather than arriving in an ephemeral reply only a director
+  // could have been handed. So the check is made here instead of being implied
+  // by where the message came from.
+  //
+  // The dancer's buttons are safe for anyone to press because they act on the
+  // clicker rather than on a named person — `start` opens your own window and
+  // `quit` withdraws you.
+  const DANCER_ACTIONS: DiamondsAction[] = ["start", "quit"];
+  if (!DANCER_ACTIONS.includes(action)) {
+    if (!isDirector(await getDirectorIds(env), userId)) {
+      return json(ephemeral("That one's for the directors."));
+    }
+  }
+
+  // Opening a modal has to be the immediate response — there is no deferring
+  // your way into one — so these read what they need inline. A KV read inside
+  // the three-second window is fine.
+  //
+  // The round comes off the record rather than out of the custom id, because a
+  // button lives as long as its message: a card from last week with a round
+  // baked into it would take a Round 1 ballot on a Round 2 video.
+  if (action === "score" || action === "doc" || action === "note") {
+    const dancer = arg;
+    if (!/^\d{15,}$/.test(dancer)) return json(ephemeral("That button has gone stale."));
+
+    const record = await getRecord(env, dancer);
+    if (!record) return json(ephemeral(`<@${dancer}> isn't registered.`));
+
+    const policy = await getDiamondsPolicy(env);
+    const round = roundToScore(record, policy.minScores);
+    if (round === undefined) {
+      return json(
+        ephemeral(
+          `Nothing of <@${dancer}>'s is open right now — either the result has ` +
+            `gone out or they haven't submitted. The card above is out of date.`,
+        ),
+      );
+    }
+
+    if (action === "doc") return json(feedbackModal(dancer, record.cohort));
+    if (action === "note") {
+      return round === 0
+        ? json(
+            ephemeral(
+              "Round 0's writing *is* the document — use *Write feedback*. There's " +
+                "no second place for it to go, because the verdict travels inside it.",
+            ),
+          )
+        : json(noteModal(dancer, round));
+    }
+    return round === 0
+      ? json(
+          ephemeral(
+            "Round 0 is the two buttons — pass or fail, no numbers. What you saw " +
+              "goes in the feedback, where they can use it.",
+          ),
+        )
+      : json(scoreModal(dancer, round, record.target));
+  }
+
+  // Round 0's ballot: the whole thing is in the button that was pressed.
+  if (action === "verdict") {
+    const [dancer, verdict] = arg.split(":");
+    if (!dancer || !/^\d{15,}$/.test(dancer) || (verdict !== "pass" && verdict !== "fail")) {
+      return json(ephemeral("That button has gone stale."));
+    }
+    return ballotReply(env, interaction, ctx, dancer, userId, { verdict });
+  }
+
+  if (action === "score-save") {
+    const dancer = arg;
+    if (!/^\d{15,}$/.test(dancer)) return json(ephemeral("That form has gone stale."));
+
+    const target = parseScore(modalValue(interaction, SCORE_TARGET));
+    const dimensions = DIMENSIONS.map((one) =>
+      parseScore(modalValue(interaction, `${SCORE_PREFIX}${one}`)),
+    );
+    const scores = dimensions.some((one) => one === undefined)
+      ? undefined
+      : (Object.fromEntries(
+          DIMENSIONS.map((one, index) => [one, dimensions[index]!]),
+        ) as Scores);
+
+    // A form is submitted whole, so a box that didn't parse is the only thing
+    // worth saying — and it has to be said before anything is recorded.
+    if (target === undefined && scores === undefined) {
+      return json(
+        ephemeral(
+          "Scores have to be plain numbers from 0 to 10 — `7` or `7.5`, not `7,5` " +
+            "and not words. Nothing was recorded; press *Score* again.",
+        ),
+      );
+    }
+    return ballotReply(env, interaction, ctx, dancer, userId, {
+      targetScore: target,
+      scores,
+    });
+  }
+
+  if (action === "preview") {
+    const dancer = arg;
+    if (!/^\d{15,}$/.test(dancer)) return json(ephemeral("That button has gone stale."));
+
+    // Ephemeral, and deliberately *not* an update of the card it was pressed
+    // from: the card belongs to the channel and the read-back belongs to
+    // whichever of them pressed it.
+    ctx.waitUntil(
+      (async () => {
+        let payload: MessagePayload;
+        try {
+          const { policy, ctx: panels } = await context(env);
+          payload = await resultPreview(env, dancer, panels, policy);
+        } catch (err) {
+          payload = {
+            content: `That didn't go through: ${err instanceof Error ? err.message : String(err)}`,
+          };
+        }
+        await editOriginalResponse(env, interaction.application_id, interaction.token, payload);
+      })(),
+    );
+    return json({
+      type: InteractionResponseType.DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE,
+      data: { flags: MessageFlags.EPHEMERAL },
+    });
+  }
+
+  if (action === "quit") {
+    ctx.waitUntil(
+      (async () => {
+        let payload: MessagePayload;
+        try {
+          const result = await withdraw(env, userId);
+          payload = result.ok
+            ? {
+                content:
+                  `You're off the list, and the wait has started. A director can ` +
+                  `put you back on inside it if your case warrants it — ask them ` +
+                  `rather than waiting it out in silence.`,
+                components: [],
+              }
+            : { content: `❌ ${result.reason}`, components: [] };
+        } catch (err) {
+          payload = {
+            content: `That didn't go through: ${err instanceof Error ? err.message : String(err)}`,
+          };
+        }
+        await editOriginalResponse(env, interaction.application_id, interaction.token, payload);
+      })(),
+    );
+    return json({ type: InteractionResponseType.DEFERRED_UPDATE_MESSAGE });
+  }
 
   if (action === "start") {
     const round = parseRound(arg);
@@ -818,6 +983,170 @@ export async function handleDiamondsComponent(
     type: InteractionResponseType.DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE,
     data: { flags: MessageFlags.EPHEMERAL },
   });
+}
+
+/**
+ * The result read back exactly as the dancer will read it, with the one
+ * irreversible button under it.
+ *
+ * Shared by `/diamonds result` and the card's *Read back & send*, because two
+ * copies of this would eventually disagree and the preview would be a lie. The
+ * preview is built from the same function the DM is, for the same reason.
+ */
+async function resultPreview(
+  env: Env,
+  dancer: string,
+  ctx: PanelContext,
+  policy: DiamondsPolicy,
+): Promise<MessagePayload> {
+  const record = await getRecord(env, dancer);
+  if (!record) return { content: `❌ <@${dancer}> isn't registered.` };
+
+  const round = roundToScore(record, policy.minScores);
+  if (round === undefined || round === 0) {
+    return {
+      content:
+        round === 0
+          ? `❌ Round 0 sends itself — its result **is** their feedback document, ` +
+            `so write it with *Write feedback* and it goes the moment you've both ` +
+            `called it.`
+          : `❌ Nothing of <@${dancer}>'s is waiting on a result.`,
+    };
+  }
+
+  const settled = settleRound(record, round, policy);
+  const counted = tally(roundOf(record, round), policy.minScores);
+  if (!settled) {
+    return {
+      content:
+        `❌ Round ${round} isn't settled — ${counted.count} of ${policy.minScores} ` +
+        `ballots in.`,
+    };
+  }
+
+  const notes = composeFeedback(roundOf(record, round), await getDirectorIds(env));
+  return {
+    content:
+      `**This is what <@${dancer}> will receive. Nothing has been sent yet.**` +
+      (notes
+        ? ""
+        : `\n*No director has written anything — write a note first if you meant to.*`) +
+      `\n\n${resultMessage(record, round, settled, counted, notes, ctx, policy)}`,
+    components: [
+      {
+        type: ComponentType.ACTION_ROW,
+        components: [
+          {
+            type: ComponentType.BUTTON,
+            style: ButtonStyle.DANGER,
+            label: "Send this result",
+            custom_id: diamondsCustomId("send", dancer),
+          },
+        ],
+      },
+    ],
+  };
+}
+
+/**
+ * One ballot, from a button or a form, answered with the same sealed receipt
+ * the command gives.
+ *
+ * Ephemeral and deferred: scoring touches KV, sends Round 0's document when the
+ * second verdict lands, and edits the review card, which is more than the
+ * three-second interaction budget should be asked to cover.
+ */
+async function ballotReply(
+  env: Env,
+  interaction: Interaction,
+  ctx: ExecutionContext,
+  dancer: string,
+  by: string,
+  input: ScoreInput,
+): Promise<Response> {
+  ctx.waitUntil(
+    (async () => {
+      let payload: MessagePayload;
+      try {
+        const now = new Date();
+        const policy = await getDiamondsPolicy(env);
+        const result = await scoreRound(env, dancer, by, input, policy, now);
+        if (!result.ok) {
+          payload = { content: `❌ ${result.reason}` };
+        } else {
+          const receipt = ballotReceipt(
+            result.record,
+            result.round,
+            result.tally,
+            result.splits,
+            result.settled,
+            policy,
+          );
+          payload = {
+            content: result.warning
+              ? `${receipt.content}\n⚠️ ${result.warning}`
+              : receipt.content,
+          };
+        }
+      } catch (err) {
+        payload = {
+          content: `That didn't go through: ${err instanceof Error ? err.message : String(err)}`,
+        };
+      }
+      await editOriginalResponse(env, interaction.application_id, interaction.token, payload);
+    })(),
+  );
+
+  return json({
+    type: InteractionResponseType.DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE,
+    data: { flags: MessageFlags.EPHEMERAL },
+  });
+}
+
+const SCORE_TARGET = "score-target";
+const SCORE_PREFIX = "score-";
+
+/**
+ * The ballot as a form: one box at Round 1, four at Round 2.
+ *
+ * Round 1's box is labelled with the thing being scored rather than with the
+ * word "score", because the number means nothing without it — and the label is
+ * the last chance to put the named weakness in front of someone who is about to
+ * type a number about it.
+ *
+ * Five inputs is Discord's limit, which the four dimensions fit inside. If a
+ * fifth dimension is ever wanted, this becomes two forms or a select, and that
+ * is a reason to think twice rather than a reason to split it.
+ */
+function scoreModal(dancer: string, round: Round, target: string | undefined): unknown {
+  const row = (custom_id: string, label: string, placeholder: string) => ({
+    type: ComponentType.ACTION_ROW,
+    components: [
+      {
+        type: ComponentType.TEXT_INPUT,
+        custom_id,
+        style: TextInputStyle.SHORT,
+        label: label.slice(0, 45),
+        placeholder,
+        max_length: 5,
+        required: true,
+      },
+    ],
+  });
+
+  return {
+    type: InteractionResponseType.MODAL,
+    data: {
+      custom_id: diamondsCustomId("score-save", dancer),
+      title: `Round ${round} ballot`,
+      components:
+        round === 1
+          ? [row(SCORE_TARGET, target ?? "The named weakness, now", "0–10, e.g. 7.5")]
+          : DIMENSIONS.map((one) =>
+              row(`${SCORE_PREFIX}${one}`, DIMENSION_LABEL[one], "0–10, e.g. 7.5"),
+            ),
+    },
+  };
 }
 
 const NOTE_INPUT = "note-text";

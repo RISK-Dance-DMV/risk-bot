@@ -433,6 +433,25 @@ export const DIAMONDS_COMMAND = {
     },
     {
       type: ApplicationCommandOptionType.SUB_COMMAND,
+      name: "grant",
+      description: "Directors: record an existing Diamond's membership, no audition",
+      options: [
+        {
+          type: ApplicationCommandOptionType.USER,
+          name: "dancer",
+          description: "Who",
+          required: true,
+        },
+        {
+          type: ApplicationCommandOptionType.STRING,
+          name: "until",
+          description: "YYYY-MM-DD they must re-audition by — leave blank to derive it from today",
+          required: false,
+        },
+      ],
+    },
+    {
+      type: ApplicationCommandOptionType.SUB_COMMAND,
       name: "assign",
       description: "Directors: put one person's piece up, with what it's testing",
       options: [

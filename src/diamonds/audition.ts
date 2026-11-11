@@ -131,6 +131,20 @@ export interface RoundRecord {
   extension?: Extension;
   submittedAt?: string;
   submissionUrl?: string;
+  /**
+   * The review card for this round's video, in #audition-review.
+   *
+   * Kept per round rather than per person because each submission is its own
+   * thing to watch and judge — three rounds are three videos, and a card that
+   * got rewritten each time would lose the two you'd want to compare.
+   *
+   * Stored so the card can be brought up to date as ballots land and the
+   * result goes out. A card that still says "needs two ballots" a week after
+   * the result was sent is worse than no card, because it is the thing people
+   * are reading instead of the record.
+   */
+  reviewMessageId?: string;
+  reviewChannelId?: string;
   /** Set once the deadline DM has gone out, so it goes out once. */
   remindedAt?: string;
   /**
@@ -314,8 +328,76 @@ export interface DiamondsRecord {
    * justifies the outcome, which is not a thing anyone does on purpose.
    */
   targetFixedAt?: string;
-  /** Returning Diamonds only. Their Round 0 — they submit nothing. */
+  /**
+   * Round 0's feedback, which is also Round 0's result — the verdict travels
+   * inside it. Both cohorts get one; only newcomers submit something to earn
+   * it.
+   */
   document?: FeedbackDocument;
+  /** When they last passed Round 2, which is when membership started. */
+  memberSince?: string;
+  /**
+   * The Jan 1 or Jul 1 they must have re-auditioned by — see `enforcementFor`.
+   *
+   * Stored rather than derived, which is the one place this module breaks its
+   * own rule, and deliberately: it is derived from `memberSince` *at the moment
+   * of the pass*, and a date recomputed later from a `memberSince` that has
+   * since moved would quietly reschedule somebody's membership. The record of
+   * what they were told is the thing that has to survive, not the formula.
+   */
+  enforcedAt?: string;
+  /**
+   * Which rungs of the renewal ladder have gone out, keyed by the rung's own
+   * day count — `{ "60": "2028-11-02T…" }`.
+   *
+   * Keyed by days rather than by position so that KV is readable when somebody
+   * asks why Maya got two warnings. The trade-off: move the ladder from 60 to
+   * 55 mid-term and the new rung fires for someone who already had the old one.
+   * That's the right way round — a changed ladder is a deliberate act, and the
+   * alternative is a rung that silently never fires.
+   */
+  renewalNoticedAt?: Record<string, string>;
+  /**
+   * Auditions already finished, oldest first. Written by `reAudition` and read
+   * by nothing that decides anything.
+   *
+   * The live audition stays exactly where it was — `rounds`, `target`,
+   * `document` — so none of the forty-odd functions in this module can tell a
+   * fourth audition from a first. That is the whole point of archiving rather
+   * than keeping a list of auditions: the alternative re-points every one of
+   * them at `current.rounds` and buys nothing.
+   */
+  history?: FinishedAudition[];
+  /**
+   * When membership was revoked for not re-auditioning in time.
+   *
+   * Set only once the role has actually come off, never before — see
+   * `runDiamondsSweep`. The membership fields are cleared with it, so the record
+   * says what is true now and the notice ladder has nothing left to count down
+   * to; this field is what remains as the fact that it happened.
+   */
+  lapsedAt?: string;
+  withdrawnAt?: string;
+}
+
+/**
+ * One audition that has ended, lifted off the record whole.
+ *
+ * Holds the five live fields together because they belong together: Round 1's
+ * target is only meaningful beside the ballots that scored it, and the Round 0
+ * document is only meaningful beside the cover it was written about.
+ */
+export interface FinishedAudition {
+  rounds: Partial<Record<Round, RoundRecord>>;
+  target?: string;
+  targetBefore?: number;
+  targetFixedAt?: string;
+  document?: FeedbackDocument;
+  /** When the last result went out. */
+  finishedAt?: string;
+  /** How it ended: the outcome of the last round to get one. */
+  outcome?: RoundOutcome;
+  /** Set if it ended by being dropped rather than by a result. */
   withdrawnAt?: string;
 }
 
@@ -416,6 +498,26 @@ export function activeRound(record: DiamondsRecord, now: Date): ActiveRound {
 
   const first = roundOf(record, 1);
   const second = roundOf(record, 2);
+
+  // Round 2's *result* is the end of the process, and it is read before
+  // everything else because it is the latest thing that happened.
+  //
+  // Checked on `resultSentAt` rather than on `submittedAt`, which is the bug
+  // this replaces: a member who passed a year ago was still being told "waiting
+  // on your result — nothing to do", because having submitted Round 2 was the
+  // only thing being asked. Passing is not waiting, and it is not nothing: it
+  // is the one state from which someone is free to start again.
+  if (second.resultSentAt) {
+    return {
+      ok: false,
+      reason:
+        second.outcome === "passed"
+          ? "You're a Diamond — this audition is finished, and you can go again " +
+            "whenever you like. `/diamonds status` has the date your membership " +
+            "runs to."
+          : "Your audition finished at Round 2 — your result has been sent.",
+    };
+  }
 
   // A round that ended badly ends the audition, whichever round it was.
   for (const round of [1, 0] as Round[]) {
@@ -874,6 +976,24 @@ export function needsRound0Nudge(
  * Kept because "what did they average" is a question people ask, and answering
  * it with a weighted number under the same name would mislead.
  */
+/**
+ * A score off a form, or nothing.
+ *
+ * Discord has no number input, so a modal ballot arrives as text and this is
+ * the one place in the process where a score is a string. Everything that isn't
+ * a number on the ladder comes back `undefined` rather than guessing: `"7,5"`
+ * is a comma decimal, `"eight"` is a word, `"11"` is off the scale, and `""` is
+ * an empty box — which matters most of all, because `Number("")` is 0 and 0 is
+ * a real score. A ballot that silently became a zero is the worst failure this
+ * code could have.
+ */
+export function parseScore(raw: string): number | undefined {
+  const text = raw.trim();
+  if (!/^\d{1,2}(\.\d{1,2})?$/.test(text)) return undefined;
+  const value = Number(text);
+  return value >= 0 && value <= 10 ? value : undefined;
+}
+
 export function meanScore(scores: Scores): number {
   return DIMENSIONS.reduce((sum, d) => sum + scores[d], 0) / DIMENSIONS.length;
 }
@@ -966,6 +1086,363 @@ export interface Advancement {
   steps: number;
   /** Which branch of the rule carried it, for the card and the feedback. */
   because: "improved" | "already-there" | "no-movement";
+}
+
+/* -------------------------------------------------------------------------- */
+/* Starting again                                                              */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Whether the audition on the record has ended, one way or another.
+ *
+ * **Must agree with `activeRound`'s terminal branches**, and is written out
+ * rather than derived from it because they answer different questions: having
+ * submitted Round 2 without a result back is not finished, but it *is* a state
+ * where `activeRound` has nothing for you to do. A record that one of these
+ * called finished and the other called live would let someone start a second
+ * audition on top of a half-finished first — so there is a test that walks the
+ * terminal cases through both.
+ */
+export function auditionFinished(record: DiamondsRecord): boolean {
+  // Dropping it ends it. Before this, a withdrawn audition stayed open for ever
+  // and coming back resumed it mid-round, holding last cycle's piece.
+  return !!record.withdrawnAt || auditionResulted(record);
+}
+
+/**
+ * Finished *by a result* — the same question with the withdrawal left out.
+ *
+ * The two doors want different answers. A dancer registering again starts a new
+ * audition, so a dropped one is over and gets archived. A director using
+ * `/diamonds add` is overriding, and the likeliest reason to override a
+ * withdrawal is that it was a mistake — so that door restores the audition
+ * instead of replacing it, and only archives one that actually ran its course.
+ */
+export function auditionResulted(record: DiamondsRecord): boolean {
+  if (roundOf(record, 2).resultSentAt) return true;
+  return ([0, 1] as Round[]).some((round) => {
+    const outcome = roundOf(record, round).outcome;
+    return outcome === "failed" || outcome === "practice";
+  });
+}
+
+/** The outcome of the last round to have one, which is how the audition ended. */
+function endedAs(record: DiamondsRecord): { outcome?: RoundOutcome; finishedAt?: string } {
+  for (const round of [2, 1, 0] as Round[]) {
+    const entry = roundOf(record, round);
+    if (entry.outcome) return { outcome: entry.outcome, finishedAt: entry.resultSentAt };
+  }
+  return {};
+}
+
+/**
+ * When someone who didn't pass may register again, or nothing if they may now.
+ *
+ * Counted from the day the result went out, not from when they registered: the
+ * wait is for the work in between, and the clock on it should start the moment
+ * they know what to work on.
+ *
+ * Applies at whichever round it ended — a Round 0 fail, a Round 1 that didn't
+ * advance, a Round 2 under the bar. All three mean the same thing about whether
+ * they're in, so all three wait the same.
+ *
+ * **Withdrawing counts.** It is tempting to say that dropping out isn't failing
+ * — nothing was judged — but that reading is an exit from any audition that is
+ * going badly: withdraw before the result, keep the record clean, register again
+ * next week. The wait is what makes a submission mean something, so it has to
+ * attach to leaving as well as to losing, and it runs from the day they left.
+ *
+ * The honest cost is that someone with a real reason to drop out pays the same
+ * six months as someone dodging a result. That is what `/diamonds add` is for,
+ * and why withdrawing asks for confirmation first.
+ *
+ * Month arithmetic, so a result on the 31st can land a day or two over six
+ * months when the target month is shorter. Over rather than under on purpose:
+ * the wait should never come out shorter than the number says.
+ */
+export function retryBlockedUntil(
+  record: DiamondsRecord,
+  months: number,
+): string | undefined {
+  if (months <= 0) return undefined;
+  if (!auditionFinished(record)) return undefined;
+
+  const ended = endedAs(record);
+  // Whichever came last. A result that arrived after they dropped out still
+  // counts, and a drop-out with no result at all counts on its own.
+  const from = new Date(
+    record.withdrawnAt && (!ended.finishedAt || record.withdrawnAt > ended.finishedAt)
+      ? record.withdrawnAt
+      : ended.finishedAt ?? "",
+  );
+  if (Number.isNaN(from.getTime())) return undefined;
+  if (!record.withdrawnAt && (!ended.outcome || ended.outcome === "passed")) {
+    return undefined;
+  }
+  const until = new Date(
+    Date.UTC(
+      from.getUTCFullYear(),
+      from.getUTCMonth() + months,
+      from.getUTCDate(),
+      from.getUTCHours(),
+      from.getUTCMinutes(),
+    ),
+  );
+  return until.toISOString();
+}
+
+/** Whether that wait is still running. */
+export function retryBlocked(
+  record: DiamondsRecord,
+  months: number,
+  now: Date,
+): string | undefined {
+  const until = retryBlockedUntil(record, months);
+  if (!until) return undefined;
+  return new Date(until).getTime() > now.getTime() ? until : undefined;
+}
+
+export type Restart = { ok: true; record: DiamondsRecord } | Refusal;
+
+/**
+ * Clears the finished audition onto `history` and hands back a record at the
+ * start of a new one.
+ *
+ * This is the whole of starting again. The membership fields are deliberately
+ * untouched — `memberSince`, `enforcedAt` and `renewalNoticedAt` belong to the
+ * term, not to the audition, and the notice markers are cleared where the date
+ * moves (on the pass) rather than here. Clearing them here instead would silence
+ * the ladder for anyone who started a re-audition and then stopped.
+ *
+ * Three fields have to go that are easy to miss, because they hang off the
+ * record rather than off `rounds`:
+ *
+ * - `targetFixedAt`, or `fixTarget` would refuse to set a new Round 1 target,
+ *   correctly, for last year's reason.
+ * - `target` and `targetBefore` with it, or the new Round 1 would be scored
+ *   against last year's number.
+ * - `document`, or a new Round 0 document would overwrite the old one — and
+ *   that document *is* the old Round 0's result.
+ *
+ * The cohort turns on how the last audition ended, not on having been here
+ * before. A member renewing is `returning` and owes no cover, which is the
+ * asymmetry the flag exists for: the directors have watched them all season.
+ * Someone who didn't pass is `new` again and owes one, because nobody has
+ * watched them do anything since.
+ */
+export function reAudition(record: DiamondsRecord, at: string): Restart {
+  if (Object.keys(record.rounds).length === 0) {
+    return {
+      ok: false,
+      reason: "There's nothing to archive — this record is already at the start.",
+    };
+  }
+  if (!auditionFinished(record)) {
+    return {
+      ok: false,
+      reason:
+        "Your current audition hasn't finished yet, so there's nothing to start " +
+        "again. `/diamonds status` has where it stands.",
+    };
+  }
+
+  const ended = endedAs(record);
+  const finished: FinishedAudition = {
+    rounds: record.rounds,
+    target: record.target,
+    targetBefore: record.targetBefore,
+    targetFixedAt: record.targetFixedAt,
+    document: record.document,
+    finishedAt: ended.finishedAt,
+    outcome: ended.outcome,
+    withdrawnAt: record.withdrawnAt,
+  };
+
+  return {
+    ok: true,
+    record: {
+      ...record,
+      history: [...(record.history ?? []), finished],
+      rounds: {},
+      target: undefined,
+      targetBefore: undefined,
+      targetFixedAt: undefined,
+      document: undefined,
+      // A member who simply didn't re-audition comes back as `returning` — they
+      // were a Diamond and nobody has seen them fail anything. Someone who
+      // failed, or who dropped out, comes back as `new` and owes a cover.
+      cohort:
+        !record.withdrawnAt && ended.outcome === "passed" ? "returning" : "new",
+      // Round 1's working gap counts from here, so it is this audition's
+      // registration rather than the first one ever.
+      registeredAt: at,
+      withdrawnAt: undefined,
+    },
+  };
+}
+
+/** Which audition this is, counting from one. */
+export function auditionNumber(record: DiamondsRecord): number {
+  return (record.history?.length ?? 0) + 1;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Membership                                                                  */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Membership is checked twice a year, and at midnight Eastern on the day —
+ * which is 05:00Z in January and 04:00Z in July.
+ *
+ * The hour is not about precision. Nothing in the process turns on an hour, and
+ * the removal job should be generous anyway. It is about what the *date* renders
+ * as: build these at 00:00Z and Discord shows a New York reader December 31,
+ * which is a different sentence from the one the rule makes.
+ */
+const ENFORCEMENT = {
+  january: { month: 0, hour: 5 },
+  july: { month: 6, hour: 4 },
+} as const;
+
+const enforcementAt = (year: number, gate: { month: number; hour: number }): string =>
+  new Date(Date.UTC(year, gate.month, 1, gate.hour)).toISOString();
+
+/**
+ * The date someone who passed at `passedAt` must have re-auditioned by.
+ *
+ * Two halves of the year, and the enforcement date is the **second** one after
+ * your half closes — so everybody gets between 9 and 15 months, and nobody
+ * passes in December only to be checked four weeks later. Nine rather than ten
+ * at the floor: a pass on March 31 or September 30 sits at the very end of its
+ * window and lands nine months and a day later.
+ *
+ *   Jan, Feb, Mar  →  Jan 1, year + 1
+ *   Apr … Sep      →  Jul 1, year + 1
+ *   Oct, Nov, Dec  →  Jan 1, year + 2
+ *
+ * The first and third rows are the *same* window — October to March, crossing
+ * the year boundary — which is why they land on the same January and why a
+ * February pass gets ten months where the October one got fifteen. That spread
+ * is the incentive, not a rounding error: auditioning early in your window is
+ * worth up to six months of membership, and it pulls re-auditions toward the
+ * front of the window instead of stacking them against the deadline.
+ *
+ * Month arithmetic rather than "the first date more than N days out", because a
+ * day count makes the boundary between March 31 and April 1 depend on where the
+ * hours fall, and a member should be able to work out their own date.
+ */
+export function enforcementFor(passedAt: string): string {
+  const at = new Date(passedAt);
+  const month = at.getUTCMonth();
+  const year = at.getUTCFullYear();
+
+  if (month <= 2) return enforcementAt(year + 1, ENFORCEMENT.january);
+  if (month <= 8) return enforcementAt(year + 1, ENFORCEMENT.july);
+  return enforcementAt(year + 2, ENFORCEMENT.january);
+}
+
+/** Whole days from `now` to `at`, rounded up — 0.4 of a day left is still today. */
+export function daysUntil(at: string, now: Date): number {
+  const ms = new Date(at).getTime() - now.getTime();
+  return Math.ceil(ms / (24 * 60 * 60 * 1000));
+}
+
+/**
+ * Whether membership has run out.
+ *
+ * Nothing here is about *why* — dropping a re-audition part-way, never starting
+ * one, or forgetting all three notices arrive at the same place, which is the
+ * point. Abandoning a re-audition deliberately does not bring the date forward:
+ * a shorter fuse for someone who started than for someone who never did would
+ * be an argument for never starting.
+ */
+export function membershipLapsed(record: DiamondsRecord, now: Date): boolean {
+  if (!record.enforcedAt || record.lapsedAt) return false;
+  return new Date(record.enforcedAt).getTime() <= now.getTime();
+}
+
+/** The record as it reads once the role is off: membership gone, fact kept. */
+export function withLapse(record: DiamondsRecord, at: string): DiamondsRecord {
+  return {
+    ...record,
+    lapsedAt: at,
+    memberSince: undefined,
+    enforcedAt: undefined,
+    renewalNoticedAt: undefined,
+  };
+}
+
+export interface RenewalNotice {
+  /** The rung this message is, in days — what the ladder called it. */
+  rung: number;
+  /** Every rung now in the past, all of which this one message answers for. */
+  covers: number[];
+  /** Days actually left, which is what the message says. */
+  daysLeft: number;
+}
+
+/**
+ * Which rung of the renewal ladder is due, if any.
+ *
+ * Returns the **most urgent rung reached**, never a staler one, and names every
+ * rung it supersedes so they can all be marked at once. That is what stops a
+ * sweep which was down for a fortnight from sending three warnings in a row,
+ * and what stops a member who has already had the 20-day notice from then
+ * receiving the 60-day one.
+ *
+ * Says nothing once the date has passed. Somebody still on the roster the day
+ * after their enforcement date is the removal job's problem, and a fourth
+ * warning is not the answer to it.
+ */
+export function noticeDue(
+  record: DiamondsRecord,
+  ladder: readonly number[],
+  now: Date,
+): RenewalNotice | undefined {
+  // Not gated on `withdrawnAt`. Withdrawing is leaving the *audition*, and the
+  // notice is about the *membership* — so someone who dropped a re-audition
+  // still gets told their date is coming, which is the whole point: they are the
+  // likeliest person in the system to reach it. Having no membership is already
+  // covered by `enforcedAt`, which is the honest guard for "nothing to renew".
+  if (!record.enforcedAt) return undefined;
+  if (renewalUnderway(record)) return undefined;
+
+  // Compared as instants rather than as a day count: `daysUntil` rounds up, so
+  // the afternoon of the enforcement date itself comes back as 0 rather than as
+  // anything negative, and a `< 0` guard would let that afternoon send a notice
+  // saying no days remained.
+  if (new Date(record.enforcedAt).getTime() <= now.getTime()) return undefined;
+  const daysLeft = daysUntil(record.enforcedAt, now);
+
+  const covers = ladder.filter((rung) => daysLeft <= rung).sort((a, b) => a - b);
+  const rung = covers[0];
+  if (rung === undefined) return undefined;
+
+  return record.renewalNoticedAt?.[String(rung)]
+    ? undefined
+    : { rung, covers, daysLeft };
+}
+
+/**
+ * Whether they are already in the middle of re-auditioning.
+ *
+ * Nobody mid-audition should be told they are about to be removed: they are
+ * doing the exact thing the notice would be asking for, and the notice would
+ * read as if the bot hadn't noticed.
+ *
+ * Measured as "submitted since membership started, not yet resulted" rather
+ * than off a round number, because what counts is work done *this* term. Today
+ * nothing can be submitted after a pass — a record ends at Round 2 and there is
+ * no second cycle on it — so this is vacuously false and waiting for the
+ * re-audition reset to exist.
+ */
+export function renewalUnderway(record: DiamondsRecord): boolean {
+  const since = record.memberSince;
+  if (!since) return false;
+  return ROUNDS.some((round) => {
+    const entry = roundOf(record, round);
+    return !!entry.submittedAt && entry.submittedAt > since && !entry.resultSentAt;
+  });
 }
 
 /* -------------------------------------------------------------------------- */

@@ -15,7 +15,9 @@ import {
   DIMENSION_LABEL,
   ROUND_REVEAL,
   activeRound,
+  auditionNumber,
   canStartWindow,
+  retryBlocked,
   feedbackWritten,
   roundToScore,
   daysStillNeeded,
@@ -42,20 +44,59 @@ import {
   type WindowState,
 } from "./audition";
 
-export type DiamondsAction = "start" | "doc-save" | "note-save" | "send";
+export type DiamondsAction =
+  | "start"
+  /** Confirming a withdrawal, which now costs six months. */
+  | "quit"
+  /** Round 0's ballot, which is two buttons rather than a form. */
+  | "verdict"
+  /** Opens the ballot form for Rounds 1 and 2, and takes it back. */
+  | "score"
+  | "score-save"
+  /** Opens the Round 0 document, and the per-round note. */
+  | "doc"
+  | "note"
+  | "doc-save"
+  | "note-save"
+  /** The ephemeral read-back that the one irreversible button lives on. */
+  | "preview"
+  | "send";
 
-const ACTIONS: DiamondsAction[] = ["start", "doc-save", "note-save", "send"];
+const ACTIONS: DiamondsAction[] = [
+  "start",
+  "quit",
+  "verdict",
+  "score",
+  "score-save",
+  "doc",
+  "note",
+  "doc-save",
+  "note-save",
+  "preview",
+  "send",
+];
 const PREFIX = "dia";
 const ARG = /^[0-9a-zA-Z:_-]{1,64}$/;
 
 /**
- * `dia|<action>|<arg>`, where arg is a round for the start button and
- * `<dancer>:<dimension>` for the document modal.
+ * `dia|<action>|<arg>`, where arg is a round for the start button, a dancer id
+ * for everything a director presses, and `<dancer>:<verdict>` for Round 0's
+ * two.
  *
- * Notably *not* keyed by the person for the start button. The clicker's own id
- * comes off the interaction, so a button can only ever start the window of
- * whoever pressed it — which is what makes it safe to put the same panel in a
- * DM, an ephemeral reply and a nudge.
+ * The start button is notably *not* keyed by the person. The clicker's own id
+ * comes off the interaction, so it can only ever start the window of whoever
+ * pressed it — which is what makes it safe to put the same panel in a DM, an
+ * ephemeral reply and a nudge.
+ *
+ * The director's buttons are the other way round: they name the dancer, because
+ * they hang on a card in a channel rather than in anybody's DMs, and the
+ * clicker is whichever of the two sat down to review. Which is also why every
+ * one of them re-checks that the clicker is a director — a button in a channel
+ * is pressable by anyone who can see the channel.
+ *
+ * **No round in the arg.** The round is derived from the record at click time,
+ * because a button lives as long as the message does: a card from last week
+ * with `:1` baked into it would take a Round 1 ballot on a Round 2 video.
  */
 export function diamondsCustomId(action: DiamondsAction, arg: string): string {
   return `${PREFIX}|${action}|${arg}`;
@@ -101,6 +142,7 @@ export interface PanelContext {
   reviewMaxDays: number;
   /** Only the roster uses this, and only to say what's stuck on one ballot. */
   minScores: number;
+  retryMonths: number;
 }
 
 const START_BUTTON = (round: Round) => ({
@@ -141,11 +183,15 @@ function roundZeroPanel(
       : `The directors are writing up your season and deciding whether to take ` +
         `you through. It arrives here as one message — what they saw, and the ` +
         `call — and that message is what opens Round 1 for you.`;
-    return {
-      content:
-        `${head}\n✅ **You're registered.** Round 0 asks nothing of returning ` +
-        `Diamonds — no video, nothing to submit.\n${doc}`,
-    };
+    // A renewal and a first-time returning Diamond are in the same state but
+    // not in the same conversation: one of them is being told how this works
+    // and the other already knows.
+    const opening = record.history?.length
+      ? `${head}\n✅ **Your renewal is in.** Round 0 is the application and our ` +
+        `feedback on where you are now — no video, nothing to submit.`
+      : `${head}\n✅ **You're registered.** Round 0 asks nothing of returning ` +
+        `Diamonds — no video, nothing to submit.`;
+    return { content: `${opening}\n${doc}` };
   }
 
   if (entry.submittedAt) {
@@ -350,6 +396,18 @@ export function statusPanel(
     `Round 1 · ${STATE_LINE[windowState(roundOf(record, 1), ctx.windowDays, now)]}`,
     `Round 2 · ${STATE_LINE[windowState(roundOf(record, 2), ctx.windowDays, now)]}`,
   ];
+  if (record.enforcedAt) {
+    lines.push(`Membership · renews by ${day(record.enforcedAt)}`);
+  }
+  // Only once there is one, so a first-timer is never told they are on their
+  // first — which reads as a count of something they are expected to repeat.
+  const number = auditionNumber(record);
+  if (number > 1) lines.push(`This is audition ${number} · the earlier ones are on file`);
+
+  // Said here rather than only at the door, so nobody has to try registering to
+  // find out when they can.
+  const waiting = retryBlocked(record, ctx.retryMonths, now);
+  if (waiting) lines.push(`Next audition · you can register again from ${day(waiting)}`);
 
   return {
     content:
@@ -703,6 +761,263 @@ export function ballotReceipt(
   return { content: lines.join("\n") + splitWarning(splits) };
 }
 
+/* -------------------------------------------------------------------------- */
+/* The review card                                                             */
+/* -------------------------------------------------------------------------- */
+
+export interface ReviewOptions {
+  minScores: number;
+  weights: Weights;
+  bar: number;
+  floor: number;
+  /** Where the scoring commands work, since they don't work where this is posted. */
+  commandChannel: string;
+}
+
+/**
+ * One submitted video, in #audition-review, for the two of you to watch.
+ *
+ * The channel is where applicant and trainee videos already land, so a director
+ * sitting down to review has one place to be rather than three. It is also a
+ * channel in the community guild, while `/diamonds` is registered to the dance
+ * one — so the card carries buttons rather than naming commands, because a
+ * component interaction arrives from wherever the message is and a slash
+ * command does not.
+ *
+ * **Nothing sealed appears here.** A count of ballots, never a ballot: the card
+ * hangs in a channel both directors read, so anything it showed before the
+ * round settled would anchor the second of them exactly as a visible tally in
+ * the reply would. The scores and the verdict go on only once the round is
+ * settled, at which point the seal has done its work.
+ */
+export function reviewCard(
+  record: DiamondsRecord,
+  round: Round,
+  counted: Tally,
+  settled: Settled | undefined,
+  opts: ReviewOptions,
+): MessagePayload {
+  const entry = roundOf(record, round);
+  const sent = !!entry.resultSentAt;
+
+  const fields: { name: string; value: string; inline?: boolean }[] = [
+    {
+      name: "Video",
+      value: entry.submissionUrl ?? "— nothing submitted",
+      inline: false,
+    },
+    {
+      name: "Submitted",
+      value: entry.submittedAt ? day(entry.submittedAt) : "—",
+      inline: true,
+    },
+    {
+      name: "Cohort",
+      value: record.cohort === "returning" ? "Returning Diamond" : "Newcomer",
+      inline: true,
+    },
+  ];
+
+  // Round 1's two fixed facts, on the card because the round is unreadable
+  // without them: a video of someone dancing means nothing until you know which
+  // one thing you are watching and what it looked like before.
+  if (round === 1) {
+    fields.push(
+      { name: "What it tests", value: record.target ?? "— not set", inline: false },
+      {
+        name: "Where we had it",
+        value:
+          record.targetBefore === undefined
+            ? "— not set"
+            : `**${record.targetBefore.toFixed(2)}/10**, fixed ` +
+              `${record.targetFixedAt ? day(record.targetFixedAt) : "at assignment"}`,
+        inline: true,
+      },
+    );
+  }
+
+  const blocks: string[] = [reviewAsk(record, round, counted, opts)];
+  if (settled) blocks.push(reviewOutcome(record, round, counted, settled, opts));
+  if (sent) blocks.push(`📨 Result sent ${day(entry.resultSentAt!)}.`);
+
+  return {
+    embeds: [
+      {
+        title: `${record.displayName || `Dancer ${record.discordId}`} · Round ${round}`,
+        description: blocks.join("\n\n").slice(0, 4000),
+        fields,
+        footer: {
+          text: `${counted.count} of ${opts.minScores} ballots · ${
+            sent ? "result sent" : settled ? "settled, not sent" : "open"
+          }`,
+        },
+      },
+    ],
+    allowed_mentions: { parse: [] },
+    // Explicitly 0 for the reason the trainee card gives: on a card that IS an
+    // embed, SUPPRESS_EMBEDS hides the card, and an edit only clears a flag if
+    // the edit says so.
+    flags: 0,
+    components: reviewRows(record, round, settled, sent),
+  };
+}
+
+/**
+ * What the two of them can do about this video without leaving the channel.
+ *
+ * The whole point of putting them here: `/diamonds` is registered to the dance
+ * guild and this card hangs in the community one, so a command named on the
+ * card is a command you have to go somewhere else to run. A button isn't —
+ * component interactions arrive from wherever the message is.
+ *
+ * **A sent card has no buttons at all.** Everything below is either a ballot on
+ * a round that's already closed or a second send of something that cannot be
+ * unsent, so the row comes off rather than sitting there refusing.
+ */
+function reviewRows(
+  record: DiamondsRecord,
+  round: Round,
+  settled: Settled | undefined,
+  sent: boolean,
+): unknown[] {
+  if (sent) return [];
+  const id = record.discordId;
+
+  // Round 0 is a decision with two values, which is what a pair of buttons is.
+  // No modal, no ladder, nothing to type.
+  const buttons: unknown[] =
+    round === 0
+      ? [
+          {
+            type: ComponentType.BUTTON,
+            style: ButtonStyle.SUCCESS,
+            label: "Pass",
+            custom_id: diamondsCustomId("verdict", `${id}:pass`),
+          },
+          {
+            type: ComponentType.BUTTON,
+            style: ButtonStyle.DANGER,
+            label: "Fail",
+            custom_id: diamondsCustomId("verdict", `${id}:fail`),
+          },
+          {
+            type: ComponentType.BUTTON,
+            style: ButtonStyle.SECONDARY,
+            label: record.document ? "Rewrite feedback" : "Write feedback",
+            custom_id: diamondsCustomId("doc", id),
+          },
+        ]
+      : [
+          {
+            type: ComponentType.BUTTON,
+            style: ButtonStyle.PRIMARY,
+            label: "Score",
+            custom_id: diamondsCustomId("score", id),
+          },
+          {
+            type: ComponentType.BUTTON,
+            style: ButtonStyle.SECONDARY,
+            label: "Note",
+            custom_id: diamondsCustomId("note", id),
+          },
+        ];
+
+  // Deliberately a read-back and not a send. The result is the one thing in the
+  // process that can't be undone, so the button that does it belongs on an
+  // ephemeral preview of the exact words — never one click away on a card
+  // sitting in a channel.
+  if (round !== 0 && settled) {
+    buttons.push({
+      type: ComponentType.BUTTON,
+      style: ButtonStyle.SUCCESS,
+      label: "Read back & send",
+      custom_id: diamondsCustomId("preview", id),
+    });
+  }
+
+  return [{ type: ComponentType.ACTION_ROW, components: buttons }];
+}
+
+/** What the two of them still owe this video. */
+function reviewAsk(
+  record: DiamondsRecord,
+  round: Round,
+  counted: Tally,
+  opts: ReviewOptions,
+): string {
+  if (roundOf(record, round).resultSentAt) return `Done — nothing owed on this one.`;
+
+  const outstanding = Math.max(0, opts.minScores - counted.count);
+  const ballots =
+    outstanding === 0
+      ? `All ${counted.count} ballots in.`
+      : `${counted.count} of ${opts.minScores} ballots in — ${outstanding} to come. ` +
+        `Nobody sees anybody else's until they are.`;
+  // The commands still work and still do exactly this. Named as the fallback
+  // rather than the route, because a button that stops working at 11pm is worth
+  // a line of text.
+  const fallback = `\`/diamonds score\` in #${opts.commandChannel} does the same.`;
+
+  if (round === 0) {
+    const doc = record.document
+      ? `Feedback written.`
+      : `**Feedback not written yet** — *Write feedback* below. Round 0's result ` +
+        `**is** that document, so it sends itself once it exists and you've both ` +
+        `called it.`;
+    return (
+      `**Pass or fail**, no numbers — the two buttons below.\n` +
+      `${ballots} ${fallback}\n${doc}`
+    );
+  }
+
+  if (round === 1) {
+    return (
+      `**Score the one named thing**, 0–10 as it is now — *Score* below.\n` +
+      `${ballots} ${fallback}`
+    );
+  }
+
+  return `**All four dimensions**, 0–10 — *Score* below.\n${ballots} ${fallback}`;
+}
+
+/** What the ballots came to, once there is no seal left to break. */
+function reviewOutcome(
+  record: DiamondsRecord,
+  round: Round,
+  counted: Tally,
+  settled: Settled,
+  opts: ReviewOptions,
+): string {
+  if (round === 0) {
+    return settled.outcome === "passed" ? `🎉 **Through to Round 1.**` : `🚫 **Not through.**`;
+  }
+
+  if (round === 1 && settled.advancement) {
+    const { before, after, steps } = settled.advancement;
+    return (
+      `**${record.target ?? "the target"}:** ${before.toFixed(2)} → ` +
+      `${after.toFixed(2)} (${steps.toFixed(1)} anchor steps)
+` +
+      (settled.outcome === "advanced"
+        ? `🎉 **Advances.**`
+        : `🚫 **Doesn't advance** — no real movement on the thing we named.`)
+    );
+  }
+
+  if (round === 2 && counted.scores) {
+    return (
+      `${scoreLine(counted.scores, opts.weights)}
+${overallBand(counted.scores, opts.bar)}
+` +
+      (settled.outcome === "passed"
+        ? `🎉 **Passes** — clears ${opts.bar} with nothing below ${opts.floor}.`
+        : `🚫 **Doesn't pass** against ${opts.bar} / floor ${opts.floor}.`)
+    );
+  }
+
+  return `Settled.`;
+}
+
 /**
  * The result, as the dancer will read it, for a director to check before it
  * goes.
@@ -755,10 +1070,21 @@ export function resultMessage(
       `Weighted: **${weightedScore(scores, policy.weights).toFixed(2)}**`
     : "";
 
+  // The renewal date is said here, once, at the only moment it is unambiguously
+  // good news. Saying it for the first time sixty days before it expires makes
+  // it an eviction notice; saying it now makes it the shape of the thing they
+  // just joined.
+  const membership = record.enforcedAt
+    ? `\n\n**Your membership runs to ${day(record.enforcedAt)}.** Diamonds is ` +
+      `re-auditioned rather than permanent — go again before then and it renews, ` +
+      `and going early in the half is worth a longer next term. We'll remind you ` +
+      `well ahead; nothing to think about for months.`
+    : "";
+
   return settled.outcome === "passed"
     ? `**${name} — Round 2**\n\n🎉 **You've passed.** Welcome to Diamonds.${detail}\n\n` +
         `You cleared ${policy.bar} with nothing below ${policy.floor}. A director ` +
-        `will be in touch about what happens next.` + notes
+        `will be in touch about what happens next.${membership}` + notes
     : `**${name} — Round 2**\n\n🚫 **Not this cycle.**${detail}\n\n` +
         `The bar was ${policy.bar} weighted, with nothing below ${policy.floor} in ` +
         `any one area. Those are your actual numbers, not a softened version — ` +

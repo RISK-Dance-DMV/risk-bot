@@ -33,12 +33,6 @@ Two reviews and two windows, at the slow end of the review range. There's
 nothing else to add, because the only waiting the process imposes is the
 reviewing — whatever time someone takes with their feedback is time they chose.
 
-Regenerate it, with the announcement, any time:
-
-```bash
-npm run diamonds -- 2026-11-15 2027-01-10
-```
-
 ### Rolling rounds, and why the phases went
 
 An earlier version of this doc ran the rounds as **cohort-wide phases**:
@@ -248,6 +242,69 @@ Settling on `trainee_min_votes` (2 of 3) rather than unanimity matters more
 here than for trainees: a director who assigned someone's Round 1 piece has a
 view on how it went, and a director who coaches them shouldn't be the one
 voting.
+
+### Where the videos land
+
+Every submission posts a review card to **#audition-review**, the community-guild
+channel that already holds the applicant and trainee audition videos. One stack
+to work through rather than a third place to remember to look, which is the same
+argument `src/trainees/auditionFlow.ts` makes for sending its own there.
+
+The card carries the video, the cohort, what is still owed on it, and — for
+Round 1 — the target and the fixed before-number, because a video of someone
+dancing says nothing until you know which one thing you are watching and what it
+looked like before.
+
+What it never carries is a ballot. It hangs in a channel both directors read, so
+anything on it before the round settles would anchor the second of them exactly
+as a visible tally in the reply would; it shows a **count** until the round is
+settled, and the numbers only after. It is kept current as ballots land and the
+result goes out, because a card that still says "needs two ballots" a week later
+is worse than no card — it is the thing people read instead of the record.
+
+The card is posted *after* the submission is written, so a Discord failure
+degrades to how the process worked before the card existed — the submission
+counts, and `alertDirectors` says what happened.
+
+### The card is the console
+
+`/diamonds` is registered to the dance guild and the card hangs in the community
+one, so a command named on the card is a command you have to go somewhere else to
+run. A button isn't: component interactions arrive from wherever the message is.
+So the card carries them.
+
+- **Round 0 — `Pass`, `Fail`, `Write feedback`.** A decision with two values is
+  what a pair of buttons is: no modal, no ladder, nothing to type.
+- **Rounds 1 and 2 — `Score`, `Note`.** `Score` opens a form: one box at Round 1,
+  labelled with the named weakness rather than the word "score", and four at
+  Round 2. Four fits inside Discord's limit of five inputs.
+- **Once settled — `Read back & send`.** Deliberately a read-back and not a send.
+  The result is the one irreversible step, so the button that does it lives on an
+  ephemeral preview of the exact words, never one click away on a card in a
+  channel. `/diamonds result` opens the same preview, from the same function.
+- **Once sent — nothing.** The row comes off rather than sitting there refusing.
+
+Three things the buttons have to get right, all of them learned from what a
+button *is* rather than from what it does:
+
+1. **No round in the custom id.** A button lives as long as its message, so a
+   card from last week with `:1` baked into it would take a Round 1 ballot on a
+   Round 2 video. The round is derived from the record when the button is pressed.
+2. **Every one of them re-checks the clicker is a director.** The old gate was
+   implied by where the message came from — an ephemeral reply only a director
+   could have been handed. A button in a channel is pressable by anyone who can
+   see the channel.
+3. **A form input is text.** `parseScore` is the only place a score arrives as a
+   string, and the failure that matters is silent: `Number("")` is 0, and 0 is a
+   real score. `"7,5"`, `"eight"`, `"11"` and an empty box all come back as
+   nothing, and the form says so before anything is recorded.
+
+The commands all still work and still do exactly the same thing — the card names
+`/diamonds score` in #diamonds-bot as the fallback, because a button that stops
+working at 11pm is worth a line of text.
+
+A returning Diamond submits nothing, so they have no Round 0 card. Their Round 0
+still needs two verdicts, and `/diamonds roster` is the only thing that says so.
 
 ## Two directors changes the quorum
 
@@ -514,7 +571,8 @@ chose to test it with.
 The documents themselves are still the quietest risk in the whole process: one
 per returning member, at least three strengths and up to three growth areas, the
 most writing in the project, and the only deliverable the draft gave no date.
-`npm run diamonds` dates them to Round 0's deadline. With two of you, write them
+What dates them now is the turnaround you promised on the submission that asked
+for one — three to five days, per person. With two of you, write them
 before the announcement goes out if you can — they're the one thing that can't
 be done in the gaps.
 
@@ -860,6 +918,301 @@ window start, submitted link, and the Round 1 after-score. One row per person ac
 round, or you lose the thing the whole design turns on, which is that each
 person has their own position in the process.
 
+## Membership is re-auditioned, not permanent
+
+Passing Round 2 makes you a Diamond until a date, not indefinitely. Membership is
+checked on **January 1** and **July 1**, and the date you're held to is set by
+the half of the year you passed in — the *second* enforcement date after your
+half closes:
+
+| Passed in | Held to |
+|---|---|
+| Jan, Feb, Mar | Jan 1, year + 1 |
+| Apr – Sep | Jul 1, year + 1 |
+| Oct, Nov, Dec | Jan 1, year + 2 |
+
+The first and third rows are the same window — **October to March, crossing the
+year boundary** — which is why they land on the same January, and why someone who
+passes in October gets fifteen months where someone who passes the following
+March gets nine. That spread is the incentive rather than a rounding error:
+auditioning early in your half is worth up to six months of membership, and it
+pulls re-auditions toward the front of each window instead of stacking them
+against the deadline, which is the directors' interest as much as the dancer's.
+
+`enforcementFor` is month arithmetic, not "the first date more than N days out".
+A day count makes the boundary between March 31 and April 1 turn on where the
+hours fall, and a member ought to be able to work out their own date.
+
+### Nobody should ever reach their date
+
+With nine to fifteen months and an incentive to go early, a member in good
+standing re-auditions somewhere in the middle of their window and their date just
+recomputes forward. **The date is a backstop for silence, not a renewal
+appointment.** It catches two people: someone who re-auditioned and didn't pass,
+and someone who went quiet for a season. So the removal is a short list and
+ideally an empty one — and the real feature is the warning ladder, because the
+date firing at all means the warnings failed.
+
+### The ladder
+
+Three rungs, from KV: `diamonds_notice_first` (60), `diamonds_notice_second` (30),
+`diamonds_notice_final` (20). The spacing narrows on purpose — sixty days is "put
+it in your diary", thirty is "pick your week", twenty is "there is just about room
+left to finish". Twenty isn't an arbitrary floor: three rounds need about sixteen
+days end to end at the slow end of the review promise, so a notice later than
+that would be announcing a deadline that can no longer be met.
+
+Only the **most urgent rung reached** is ever sent, and sending it retires every
+gentler rung at once. That's what stops a sweep which was down for a fortnight
+from working through the ladder a day at a time, and what stops the reassuring
+sixty-day message from arriving *after* the urgent one. Only the last rung
+mentions removal; a removal warning repeated three times is a removal warning
+nobody reads.
+
+The notice is also suppressed while a re-audition is in flight and behind the
+sweep's existing one-message-per-person rule — someone being reminded to submit
+does not also need telling that failing to re-audition will remove them.
+
+### What this changed underneath
+
+`RECORD_TTL` was 400 days, which was right when a record was one two-month cycle
+and is wrong now. An enforcement date can be fifteen months out, so a 400-day
+record would have expired *before* the date written on it — taking the
+membership, the notices and the audition history with it, silently, about six
+weeks early. It's 600.
+
+### Revoking it
+
+The daily sweep takes the role off anyone whose date has passed with no
+re-audition. **Daily rather than twice a year**, which is the shape the rest of
+this section argues for: with nine to fifteen months and three warnings, reaching
+the date at all is rare, so this is a trickle of at most a person or two and not
+a mass event needing a dry run.
+
+Dropping a re-audition part-way doesn't bring the date forward. Abandoning one
+deliberately, never starting one, and ignoring all three notices all arrive at
+the same place on the same day — a shorter fuse for someone who started than for
+someone who never did would be an argument for never starting.
+
+It **fails closed** in both directions. No `config:role.diamonds` set, or Discord
+refusing the removal, and nothing is written to the record: a membership recorded
+as revoked while the role stayed on is the one failure here that nobody would
+ever notice. The sweep counts those as `blocked` and tries again tomorrow.
+
+The DM comes **after** the role and cannot stop it — a membership that could only
+end if the person were reachable would make closed DMs a way to stay a Diamond
+for ever. If it fails the role is still off, and the directors' alert says so.
+They are alerted on **every** revocation, reachable or not, because a role coming
+off somebody should not happen quietly.
+
+`lapsedAt` is the fact that remains; `memberSince`, `enforcedAt` and
+`renewalNoticedAt` are cleared with it, so the record says what is true now and
+the ladder has nothing left to count down to.
+
+### Six months before you can try again
+
+An audition that ended without a pass starts a **six-month wait**
+(`diamonds_retry_months`), counted from the day the result went out rather than
+from registration — the wait is for the work in between, and the clock on it
+should start the moment they know what to work on. It applies at whichever round
+it ended: a Round 0 fail, a Round 1 that didn't advance and a Round 2 under the
+bar all mean the same thing about whether someone is in, so they all wait the
+same.
+
+**Withdrawing counts as failing.** The tempting reading is that dropping out
+isn't failing — nothing was judged — but that reading is an exit from any
+audition that is going badly: withdraw before the result, keep the record clean,
+register again next week. So the wait attaches to leaving as well as to losing,
+and it runs from the day they left. The honest cost is that someone with a real
+reason to drop out pays the same six months as someone dodging a result, which is
+what `/diamonds add` is for.
+
+Which makes withdrawing expensive, so it now **asks first**: `/diamonds withdraw`
+explains what it costs and puts the actual withdrawal behind a button. It also
+points at the two things people reach for it by mistake instead of — nothing
+expires while you haven't started a window, and a director can extend one that's
+open.
+
+The two doors differ on a dropped audition, deliberately. A dancer registering
+again starts a new one, so the dropped one is archived and they come back as
+`new`, owing a cover. A director using `/diamonds add` **restores** it, because
+the likeliest reason to override a withdrawal is that it was a mistake.
+
+`/diamonds register` refuses inside the wait and names the date; `/diamonds add`
+doesn't check it. That's the same escape hatch registration-after-close uses, and
+for the same reason: a refusal exists to route a judgement to the two people
+entitled to make it, and `add` is where they make it. The wait is also printed on
+`/diamonds status`, so nobody has to try registering to find out when they can.
+
+### A failed renewal — decided
+
+A sitting Diamond who fails a renewal is someone who didn't pass, so the wait
+applies to them too. **Chosen, not inherited:** the directors were shown the
+combination and kept it.
+
+> Maya's date is **Jan 1 2029**. She re-auditions in October 2028 and doesn't
+> advance at Round 1. The wait runs to **20 April 2029**. Her date passes in
+> January, so the role comes off, and she can register again from April — as a
+> newcomer, owing a cover.
+
+Two things that follow and are easy to misread as bugs:
+
+- **It is six months from the failure, not "no retry before your date".** A
+  renewal that fails early enough leaves room for another attempt before the
+  date: fail in February with a January date and the wait runs out in August,
+  with five months to spare. Nothing special-cases this; it falls out of the two
+  rules and it is the right behaviour.
+- **The notice changes for these people.** Telling someone to re-audition when
+  they are barred from it is worse than saying nothing, so a member whose wait
+  outruns their date gets a different message: here is your date, here is the
+  wait, talk to a director.
+
+This is the kind of rule people need to know *before* they audition, so it
+belongs in the announcement rather than only here.
+
+`test/diamondsFlow.test.ts` walks the whole sequence as one case — warning,
+removal, refusal, return — because it is four rules interacting and each was
+decided separately. That test is what fails if any one of them moves.
+
+### What isn't built
+
+- Nothing. Grandfathering and the lapsed cohort are settled below.
+- **What happens to a sitting Diamond who re-auditions and fails.** Today they
+  keep their membership to their date and the ladder keeps warning them, so a
+  failed renewal is a second chance rather than a removal. That falls out of the
+  design rather than having been chosen, and it should be chosen.
+### Who owes a cover when they come back
+
+`reAudition` reads the cohort off how the last audition ended, which gives the
+three answers the directors wanted:
+
+| Last audition | Comes back as | Owes a cover |
+|---|---|---|
+| Passed, then simply didn't re-audition | `returning` | No |
+| Failed at any round | `new` | Yes |
+| Dropped out part-way | `new` | Yes |
+
+A member who lapsed was a Diamond and nobody has seen them fail anything, so
+their renewal is the application and current feedback. Someone who failed, or who
+left, has to show something again.
+
+### Grandfathering
+
+`/diamonds grant dancer: [until:]` records a membership with no audition behind
+it — the only way one exists without a pass. The roster predates the bot: there
+are Diamonds whose audition happened in a room, and until somebody writes their
+date down, nothing renews and nothing enforces, because every part of this keys
+off `enforcedAt`.
+
+`until` is optional and derived from today when left out, but grandfathering is
+exactly the case where the derived answer is wrong — "these two don't have to
+audition this cycle" is a decision about a specific date. So for the two who are
+exempt, give the date; for everyone else on the current roster, either grant them
+this cycle's date or leave them to register like anyone.
+
+It **refuses to guess a new date over one somebody earned** and needs `until`
+spelled out to move it, because the two mistakes aren't symmetrical: declining to
+shorten a membership costs a conversation, and silently shortening one costs
+somebody their place. It also clears a lapse, which is how somebody is put back.
+
+## Starting again
+
+A renewing member does **all three rounds**. Round 0 for them is the application
+and the directors' feedback on where they are now — no cover, because the
+directors have watched them all season, which is the asymmetry `cohort:
+"returning"` already existed for. Rounds 1 and 2 are the same as anyone's.
+
+Re-auditioning is allowed **whenever they like**, with no waiting period, and
+that rests on a property of the rule rather than on a guard: `enforcementFor` is
+monotonic, so going again can never hand someone an earlier date than the one
+they hold. There is no month in which waiting is worth more than going, so there
+is nothing to protect anyone from.
+
+### Archive on renewal
+
+A record has one `rounds` object, and `rounds` always means **the audition
+happening now**. `reAudition` lifts the finished one onto `history` and hands
+back a record at the start:
+
+| Moved to `history` | Kept |
+|---|---|
+| `rounds` | `memberSince`, `enforcedAt`, `renewalNoticedAt` |
+| `target`, `targetBefore`, `targetFixedAt` | `discordId`, `displayName` |
+| `document` | `cohort`, reset from how the last one ended |
+
+Chosen over keeping a list of auditions because every function in the module
+reads `record.rounds`, `record.target`, `record.document` — forty-odd of them —
+and under this shape **none of them change**: they cannot tell a fourth audition
+from a first. `history` is write-only as far as any decision goes.
+
+Three of the cleared fields hang off the record rather than off `rounds`, which
+makes them the easy ones to leave behind, and each one breaks something specific
+if you do:
+
+- `targetFixedAt` — `fixTarget` would refuse the new Round 1's target, correctly,
+  for last year's reason.
+- `target` and `targetBefore` — the new Round 1 would be scored against last
+  year's number.
+- `document` — a new Round 0 document would overwrite the old one, and that
+  document *is* the old Round 0's result.
+
+`renewalNoticedAt` is deliberately **not** cleared here. It is cleared on the
+pass, where the date moves; clearing it here as well would silence the ladder for
+anyone who started a re-audition and then stopped.
+
+The cohort turns on how the last audition ended rather than on having been here
+before. Passed → `returning`, owes no cover. Didn't pass → `new`, owes one,
+because nobody has watched them do anything since.
+
+### Registering again is the door
+
+`/diamonds register` does the reset, when and only when the last audition has
+finished. One door rather than a second command: "put my name down for this
+audition" is the same sentence the second time, and someone who has finished and
+wants another go will look for the thing they used the first time. Someone who
+withdrew part-way and came back is picking up where they left off, which is what
+registering always did and still does.
+
+`/diamonds add` does the same reset, and then the cohort the director picked
+wins — that being the point of the option.
+
+`auditionFinished` and `activeRound` have to agree about what "finished" means,
+or a half-finished audition could be archived out from under itself. They are
+written separately, because having submitted Round 2 with no result back is not
+finished even though `activeRound` has nothing to offer, and a test walks the
+terminal cases through both.
+
+### The directors are exempt
+
+Both directors are Diamonds and will re-audition, but their renewal is a
+formality: they are the ones judging it. So a director gets **no enforcement date
+and no notices**. Holding a date over them would be the bot chasing its own
+judges for a verdict they'd have to give themselves.
+
+Two things follow that aren't solved:
+
+- **A director's own audition can't settle.** `minScores` is 2 and there are two
+  of them, so a recusal leaves one ballot against a threshold of two — the hole
+  this document already describes, except it is no longer hypothetical: it is
+  their own records. An audition they do for practice will sit unballoted.
+- **Which would make `/diamonds roster` noisy**, if the audition were left
+  hanging. The roster filters out withdrawn records, so the answer is to
+  `/diamonds withdraw` when the practice is done: the entry leaves the
+  directors' working view and the membership is untouched. No `practice` flag,
+  and no concept in the process that deliberately skips judgement.
+
+### Withdrawing leaves the audition, not Diamonds
+
+A member who withdraws keeps `memberSince` and `enforcedAt` — withdrawal is
+about the audition in front of them, not their standing.
+
+So the sweep splits: the **round reminders stop** for a withdrawn record, and the
+**renewal notice doesn't**. That split is the point. Someone who dropped a
+re-audition part-way is the likeliest person in the whole system to reach their
+enforcement date, and silence is exactly what would take them there. `noticeDue`
+is gated on `enforcedAt` rather than on `withdrawnAt` for the same reason:
+"nothing to renew" is a fact about membership, and withdrawing isn't one.
+
 ## Still open
 
 Answered: nothing has gone out; **pass/fail**, not ranked; **two directors**;
@@ -868,10 +1221,20 @@ extensions are **partial days granted by a director**; the eligibility gate
 **stays** (Majors are open, so there's a path through); Round 0 is
 **registration** for returners.
 
+And on membership: enforcement is **Jan 1 / Jul 1**, the date is the **second one
+after your half closes**; a renewing member does **all three rounds**; the
+directors are **exempt**; an audition that didn't pass — including one dropped
+part-way — carries a **six-month wait**, and that applies to a **failed renewal**
+too, so the role comes off at the date and the next attempt is six months after
+the failure. Grandfathering is `/diamonds grant`. **None of this is
+announced yet** — the announcement is yours to write, and what it has to cover
+is in the appendix.
+
 **The critical path, and rolling rounds shortened it:**
 
-1. **Set up and post the announcement on NOV 15.** The text is generated and
-   ready; the six setup steps are in
+1. **Set up and post the announcement on NOV 15.** The text is yours to write
+   — the appendix lists what it has to cover, including the membership rules,
+   which nothing says anywhere public yet. The six setup steps are in
    [Before it runs](#before-it-runs), with the flag last.
 2. **Calibrate against the deck — before NOV 15, not after.** Under phases
    there were three weeks between the announcement and the first thing needing a
@@ -908,25 +1271,44 @@ Treating as settled unless you say otherwise: **tiered feedback** for the
 practice cohort (§2), and **Round 0 as a pass/fail gate** carrying its own
 written feedback either way (§5).
 
-## Appendix: the announcement
+## Appendix: what the announcement has to say
 
-Generated, so it can't drift from the calendar:
+Written by hand, so the one risk is leaving something out. There used to be a
+generator here; it only knew about a single cycle with a close date, so every
+deadline it printed is now wrong, and it's gone.
 
-```bash
-npm run diamonds -- <your announcement date>
-```
+**The things nobody can guess**, so they have to be stated:
 
-It prints the text with every date filled in, ready to paste. The placeholder
-(`[request for it from the bot]`) is gone and the window mechanic is spelled
-out, since that's the one part nobody can guess.
+- **The window mechanic.** You start it yourself, you get `windowDays` to learn
+  the piece, record it and submit, and the clock doesn't stop. This is the part
+  of the process that is genuinely unusual.
+- **The turnaround you're promising** — three to five days after each
+  submission. It's a commitment; the bot repeats it on every card.
+- **How you register, get your piece and start your window**, by command, with
+  no director in the loop.
 
-It now states that there's no fixed number of spots, since it's pass/fail.
-**That line commits you to taking everyone who clears the bar** — delete it if
-§1b is unresolved, because it's much worse to walk back than to never say.
+**The membership rules**, none of which are written down anywhere a dancer can
+read:
 
-One thing it still doesn't say, because it's unanswered above: whether the
-practice cohort gets the same feedback through Round 2. That belongs in the
-announcement rather than in a reply to whoever asks first.
+- Enforcement is **Jan 1 and Jul 1**, and your date is the second one after your
+  half closes — so a term runs nine to fifteen months. **Auditioning early is
+  worth months**, and that's the whole incentive.
+- Renewing means **all three rounds again**. Round 0 for a returning member is
+  the application and the current feedback, not a shortcut.
+- An audition that didn't pass carries a **six-month wait** before you can
+  register again, **and dropping out part-way counts the same as failing** —
+  otherwise you could re-roll a piece you didn't like by quitting. This is the
+  rule people need before they audition, not when they hit it.
+- If you don't renew, the role comes off at your date.
+
+**The things that are a choice, so decide before you write them:**
+
+- **No fixed number of spots.** True — it's pass/fail against a bar. Saying it
+  commits you to taking everyone who clears it, which is much worse to walk back
+  than to never say. §1b is still open.
+- **Whether the practice cohort gets the same feedback through Round 2.**
+  Unanswered above. It belongs in the announcement rather than in a reply to
+  whoever asks first.
 
 Send it through rank 6 — `createDraft` with a dance-guild target — so it gets
 read by a human before it posts, rather than pasted straight in.

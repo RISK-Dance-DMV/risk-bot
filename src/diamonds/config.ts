@@ -12,10 +12,11 @@
  * numbers below.
  *
  * The timeline carry defaults rather than refusing when KV is empty. The
- * announcement is generated from these same numbers by
- * `scripts/diamonds-schedule.ts`, and a bot that disagrees with the
- * announcement about a deadline is the worse failure of the two — an empty KV
- * would give us one silently.
+ * announcement quotes deadlines in prose and is written by hand, so these
+ * numbers are the only machine-readable copy; a bot that disagrees with the
+ * announcement about a deadline is the worse failure of the two, and an empty
+ * KV would give us one silently. `/diamonds config` is what you read against
+ * the announcement before turning the flag on.
  */
 import { slotInstant } from "../applications/interviewSlot";
 import { getNumber, getTimeZone } from "../config/settings";
@@ -23,8 +24,8 @@ import { daysStillNeeded, DEFAULT_WEIGHTS, type DiamondsTimeline, type Weights }
 import type { Env } from "../env";
 
 /**
- * `npm run diamonds -- 2026-11-15 --closes=2027-01-10`, which is also what the
- * announcement was written from. Change both together or neither.
+ * The two days the announcement was written from. Change these and the
+ * announcement together, or neither.
  */
 const DEFAULT_DAYS = {
   opensAt: "2026-11-15",
@@ -141,6 +142,14 @@ export interface DiamondsPolicy {
   reviewMaxDays: number;
   /** Directors who must score a round before it settles. */
   minScores: number;
+  /**
+   * Days before an enforcement date that a renewal notice goes out, most
+   * urgent first. Sorted here so nothing downstream has to care what order
+   * they were read in.
+   */
+  noticeDays: number[];
+  /** Months before someone who didn't pass may register again. */
+  retryMonths: number;
   weights: Weights;
 }
 
@@ -155,6 +164,10 @@ export async function getDiamondsPolicy(env: Env): Promise<DiamondsPolicy> {
     reviewMinDays,
     reviewMaxDays,
     minScores,
+    noticeFirst,
+    noticeSecond,
+    noticeFinal,
+    retryMonths,
   ] = await Promise.all([
     getNumber(env, "diamonds_window_days"),
     getNumber(env, "diamonds_bar"),
@@ -165,6 +178,10 @@ export async function getDiamondsPolicy(env: Env): Promise<DiamondsPolicy> {
     getNumber(env, "diamonds_review_min_days"),
     getNumber(env, "diamonds_review_max_days"),
     getNumber(env, "diamonds_min_scores"),
+    getNumber(env, "diamonds_notice_first"),
+    getNumber(env, "diamonds_notice_second"),
+    getNumber(env, "diamonds_notice_final"),
+    getNumber(env, "diamonds_retry_months"),
   ]);
   // Weights stay in code. They're the shape of the rubric rather than a
   // threshold — moving the bar is a cycle decision, re-weighting the dimensions
@@ -179,6 +196,13 @@ export async function getDiamondsPolicy(env: Env): Promise<DiamondsPolicy> {
     reviewMinDays,
     reviewMaxDays,
     minScores,
+    // Deduplicated as well as sorted: setting two rungs to the same number is a
+    // typo, and the honest reading of it is one rung rather than two notices on
+    // the same morning.
+    noticeDays: [...new Set([noticeFirst, noticeSecond, noticeFinal])].sort(
+      (a, b) => a - b,
+    ),
+    retryMonths,
     weights: DEFAULT_WEIGHTS,
   };
 }
@@ -221,6 +245,19 @@ const POLICY_KEYS = [
  * have the bot quoting timeline the announcement never mentioned. This is what you
  * read before flipping it, and it works while the flag is off.
  */
+/**
+ * The Diamonds role, or nothing.
+ *
+ * Nothing is a real answer and the callers have to treat it as one: the lapse
+ * pass refuses to mark anybody as removed while this is unset, because a
+ * membership recorded as revoked without the role actually coming off is the
+ * one failure nobody would notice.
+ */
+export async function getDiamondsRoleId(env: Env): Promise<string | null> {
+  const raw = await env.KV.get("config:role.diamonds");
+  return raw?.trim() ? raw.trim() : null;
+}
+
 export async function inspectDiamondsConfig(env: Env): Promise<DiamondsConfigReadout> {
   const dateKeys = Object.keys(KV_KEY) as DateKey[];
   const [timeZone, timeline, policy, enabledRaw, roleRaw, ...raw] = await Promise.all([
