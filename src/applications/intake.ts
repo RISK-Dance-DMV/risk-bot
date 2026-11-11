@@ -5,6 +5,7 @@ import { isEnabled } from "../config/flags";
 import { getNumber } from "../config/settings";
 import {
   alertDirectors,
+  createThreadOnMessage,
   editMessage,
   postMessage,
   postToChannelByName,
@@ -43,10 +44,25 @@ export interface CardRecord {
   channelId: string;
   method: AuditionMethod;
   state: CardState;
+  /**
+   * What the card was before it closed, so [Reopen] restores that rather than
+   * assuming every closure was an audition-form timeout.
+   */
+  closedFrom?: CardState;
   /** ISO. Restarts on reopen - the clock measures the current wait, not the first. */
   waitingSince: string;
+  /** Thread opened on the card, where everything about this applicant is said. */
+  threadId?: string;
+  /** Someone chose to skip the interview, so the outcome buttons are drawn. */
+  outcomesRevealed?: boolean;
   values?: string[];
   videos?: VideoGroup[];
+  /**
+   * Videos from the separate audition form. Kept apart from `videos`, which is
+   * recomputed from the application row every time the card is redrawn and
+   * would otherwise wipe them.
+   */
+  auditionVideos?: VideoGroup[];
   decision?: Decision;
   interview?: InterviewRecord;
   outcome?: OutcomeRecord;
@@ -56,7 +72,26 @@ export interface CardRecord {
 export const CARDED_PREFIX = "app:carded:";
 const cardedKey = (row: number) => `${CARDED_PREFIX}${row}`;
 
+/**
+ * Records this isolate has written, so a click that follows a click reads its
+ * own write back.
+ *
+ * KV is eventually consistent: a read within about a minute of a write can
+ * still hand back the previous value. On a tally that's invisible — the next
+ * redraw corrects it. On the applicant-facing feedback box it is not: the
+ * prefill arrives holding the note you just replaced, which reads as the wrong
+ * applicant's text.
+ *
+ * Bounded to roughly the window KV is stale for. Past that, KV is the better
+ * answer anyway, because another isolate may have written since.
+ */
+const RECENT_WRITE_MS = 60_000;
+const recentWrites = new Map<number, { record: CardRecord; at: number }>();
+
 export async function getRecord(env: Env, row: number): Promise<CardRecord | null> {
+  const recent = recentWrites.get(row);
+  if (recent && Date.now() - recent.at < RECENT_WRITE_MS) return recent.record;
+  if (recent) recentWrites.delete(row);
   return env.KV.get<CardRecord>(cardedKey(row), "json");
 }
 
@@ -64,6 +99,13 @@ export async function putRecord(env: Env, record: CardRecord): Promise<void> {
   await env.KV.put(cardedKey(record.row), JSON.stringify(record), {
     expirationTtl: CARDED_TTL,
   });
+  // Only after the write lands, so a failed put doesn't leave this isolate
+  // believing something KV never accepted.
+  const now = Date.now();
+  for (const [row, entry] of recentWrites) {
+    if (now - entry.at >= RECENT_WRITE_MS) recentWrites.delete(row);
+  }
+  recentWrites.set(record.row, { record, at: now });
 }
 
 export function sheetRowUrl(env: Env, row: number): string | undefined {
@@ -81,14 +123,24 @@ export async function announceOnCard(
   record: CardRecord,
   body: string,
 ): Promise<void> {
-  const directorIds = await getDirectorIds(env);
+  const [directorIds, quiet] = await Promise.all([
+    getDirectorIds(env),
+    isEnabled(env, "quiet_pings"),
+  ]);
   if (directorIds.length === 0) return;
 
-  const link = `https://discord.com/channels/${env.GUILD_COMMUNITY_ID}/${record.channelId}/${record.messageId}`;
+  // Into the applicant's thread where there is one, so the channel stays a list
+  // of cards rather than a running commentary. A mention still notifies, and
+  // pulls the mentioned person into the thread.
+  const target = record.threadId ?? record.channelId;
+  const link = record.threadId
+    ? ""
+    : `\nhttps://discord.com/channels/${env.GUILD_COMMUNITY_ID}/${record.channelId}/${record.messageId}`;
+
   try {
-    await postMessage(env, record.channelId, {
-      content: `${directorIds.map((id) => `<@${id}>`).join(" ")} — ${body}\n${link}`,
-      allowed_mentions: { parse: [], users: directorIds },
+    await postMessage(env, target, {
+      content: quiet ? `${body}${link}` : `${directorIds.map((id) => `<@${id}>`).join(" ")} — ${body}${link}`,
+      allowed_mentions: { parse: [], users: quiet ? [] : directorIds },
     });
   } catch (err) {
     console.error("announceOnCard failed", record.row, err);
@@ -141,6 +193,7 @@ export async function renderCard(
   interview?: InterviewRecord,
   outcome?: OutcomeRecord,
   pending?: PendingOutcome,
+  outcomesRevealed?: boolean,
 ): Promise<MessagePayload> {
   const [directorIds, minVotes] = await Promise.all([
     getDirectorIds(env),
@@ -158,6 +211,7 @@ export async function renderCard(
     interview,
     outcome,
     pending,
+    outcomesRevealed,
   });
 }
 
@@ -181,10 +235,26 @@ export async function postRow(
     await renderCard(env, row, state, waitingSince, videos, decision),
   );
 
+  // A thread per applicant, so discussion lands beside their card. Best-effort:
+  // a card without a thread is still a working card, and losing the card because
+  // the thread failed would be the worse trade.
+  let threadId: string | undefined;
+  try {
+    threadId = await createThreadOnMessage(
+      env,
+      msg.channelId,
+      msg.id,
+      `${row.name || `Row ${row.row}`} · ${row.applicantType || "applicant"}`,
+    );
+  } catch (err) {
+    console.error("thread creation failed", row.row, err);
+  }
+
   await putRecord(env, {
     row: row.row,
     messageId: msg.id,
     channelId: msg.channelId,
+    ...(threadId ? { threadId } : {}),
     method: row.auditionMethod,
     state,
     waitingSince: waitingSince.toISOString(),
@@ -223,17 +293,21 @@ export async function setCardState(
       row,
       state,
       waitingSince,
-      videos,
+      [...videos, ...(record.auditionVideos ?? [])],
       decision,
       record.interview,
       record.outcome,
       record.pending,
+      record.outcomesRevealed,
     ),
   );
 
   const updated: CardRecord = {
     ...record,
     state,
+    // Only meaningful while closed. Left behind, it would send a later
+    // timeout-closed card back to the wrong state on [Reopen].
+    ...(state === "closed" ? {} : { closedFrom: undefined }),
     waitingSince: waitingSince.toISOString(),
     values: sheetRow.values,
     videos,
@@ -263,13 +337,28 @@ export async function refreshCard(env: Env, record: CardRecord): Promise<void> {
       row,
       record.state,
       new Date(record.waitingSince),
-      record.videos ?? [],
+      [...(record.videos ?? []), ...(record.auditionVideos ?? [])],
       record.decision ?? emptyDecision(),
       record.interview,
       record.outcome,
       record.pending,
+      record.outcomesRevealed,
     ),
   );
+}
+
+/**
+ * Closes a card because its outcome went out.
+ *
+ * Renders from the cache rather than re-reading the sheet: nothing about the
+ * application changed, and re-checking every video link would spend
+ * subrequests to redraw links the card is about to stop showing.
+ */
+export async function closeAfterOutcome(env: Env, record: CardRecord): Promise<void> {
+  if (record.state === "closed") return;
+  const updated: CardRecord = { ...record, state: "closed", closedFrom: record.state };
+  await putRecord(env, updated);
+  await refreshCard(env, updated);
 }
 
 /** Entry point for the onFormSubmit notifier. */

@@ -12,10 +12,12 @@
 import { createInterviewEvent } from "../appsScript";
 import { CARD_COLUMNS, PINNED } from "../config/columns";
 import { isEnabled } from "../config/flags";
+import { getInterviewGuests, getTimeZone } from "../config/settings";
 import { ComponentType, InteractionResponseType, TextInputStyle, type Interaction, type MessagePayload } from "../discord/types";
 import { modalValue } from "../discord/respond";
 import type { Env } from "../env";
 import { registerPublishHook } from "../drafts/hooks";
+import { describeConfirmation } from "../drafts/draft";
 import { createDraft } from "../drafts/service";
 import type { Draft } from "../drafts/draft";
 import { renderForSend } from "../email/service";
@@ -25,6 +27,7 @@ import { getRecord, putRecord, refreshCard, type CardRecord } from "./intake";
 import {
   DEFAULT_MINUTES,
   formatSlot,
+  slotInstant,
   validateSlot,
   type InterviewRecord,
 } from "./interviewSlot";
@@ -201,7 +204,8 @@ export async function draftInterview(
     content: body,
     target: { kind: "email", to: email, subject: rendered.subject },
     confirmation: { guild: "community", channel: env.CH_AUDITION_REVIEW },
-    referencesAt: new Date(`${slot.date}T${slot.time}:00Z`).toISOString(),
+    confirmationChannelId: record.threadId,
+    referencesAt: slotInstant(slot.date, slot.time, await getTimeZone(env)).toISOString(),
     meta: { hook: "interview-offer", row: String(row) },
   });
   if (!draft.ok) return { content: `❌ ${draft.reason}` };
@@ -221,7 +225,7 @@ export async function draftInterview(
   await refreshCard(env, updated);
 
   return {
-    content: `Drafted an invitation for ${formatSlot(slot.date, slot.time)}. **Nothing has been offered yet** — approve the draft in #${env.CH_AUDITION_REVIEW} to send it.`,
+    content: `Drafted an invitation for ${formatSlot(slot.date, slot.time)}. **Nothing has been offered yet** — approve the draft ${describeConfirmation(draft.draft, record.threadId)} to send it.`,
   };
 }
 
@@ -287,13 +291,22 @@ export async function confirmInterview(
   const email = record.values ? cell(record.values, PINNED.email) : "";
   if (!email) return { content: `No email on row ${row}, so there's nobody to invite.` };
 
+  const [timeZone, guests] = await Promise.all([
+    getTimeZone(env),
+    getInterviewGuests(env),
+  ]);
+
   let event;
   try {
     event = await createInterviewEvent(env, {
+      // Resolved here so the event lands on the crew's clock rather than on
+      // whatever timezone the Apps Script project happens to be set to.
+      startsAt: slotInstant(slot.date, slot.time, timeZone).toISOString(),
       date: slot.date,
       time: slot.time,
       durationMinutes: slot.durationMinutes,
       guestEmail: email,
+      guests,
       title: `RISK interview — ${application?.name || `row ${row}`}`,
       description: interview.note ?? "",
     });
@@ -325,6 +338,6 @@ export async function confirmInterview(
     ? ` — moved from the ${formatSlot(interview.date, interview.time)} you offered`
     : "";
   return {
-    content: `Scheduled for ${formatSlot(slot.date, slot.time)} (${event.timeZone}) and invited \`${email}\`${note}.`,
+    content: `Scheduled for ${formatSlot(slot.date, slot.time)} ${timeZone} — invited \`${email}\`${guests.length ? ` and ${guests.length} of us` : ""}${note}.`,
   };
 }

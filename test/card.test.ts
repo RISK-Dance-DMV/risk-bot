@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   buildIntakeMessage,
-  buildOpenRowResponse,
   customId,
   isDancer,
   parseCustomId,
@@ -15,12 +14,13 @@ import {
 } from "../src/applications/decision";
 import type { InterviewRecord } from "../src/applications/interviewSlot";
 import { parseRow } from "../src/applications/fields";
+import { SUBUNITS } from "../src/config/subunits";
 import type { MessagePayload } from "../src/discord/types";
 import type { VideoGroup } from "../src/applications/videos";
 
 /**
  * Column indices: C=2 email, D=3 type, E=4 name, G=6 age, H=7 location, I=8
- * subunits, K=10 transportation, P=15 feedback, AL=37 method, AM..AP=38..41
+ * subunits, K=10 transportation, P=15 feedback, AL=37 method, AM=38 and AO=40
  * videos, AQ=42 availability.
  */
 function makeRow(opts: {
@@ -28,7 +28,7 @@ function makeRow(opts: {
   name?: string;
   method?: string;
   fields?: Partial<Record<"G" | "H" | "I" | "K" | "P" | "AQ", string>>;
-  videos?: Partial<Record<"AM" | "AN" | "AO" | "AP", string>>;
+  videos?: Partial<Record<"AM" | "AO" | "AJ", string>>;
 } = {}) {
   const values = new Array(50).fill("");
   values[0] = "2026-09-01 10:00";
@@ -38,7 +38,7 @@ function makeRow(opts: {
   values[37] = opts.method ?? "Existing dance video submission and interview";
   const at: Record<string, number> = {
     G: 6, H: 7, I: 8, K: 10, P: 15,
-    AM: 38, AN: 39, AO: 40, AP: 41, AQ: 42,
+    AJ: 35, AM: 38, AO: 40, AQ: 42,
   };
   for (const [col, text] of Object.entries({ ...opts.fields, ...opts.videos })) {
     values[at[col] as number] = text;
@@ -61,15 +61,14 @@ const firstEmbedDescription = (msg: MessagePayload): string => {
 
 describe("custom ids", () => {
   it("round-trips and survives the token expiry by carrying the row", () => {
-    expect(parseCustomId(customId("open", 12))).toEqual({ action: "open", row: 12 });
     expect(parseCustomId(customId("reopen", 12))).toEqual({ action: "reopen", row: 12 });
     expect(customId("reopen", 12).length).toBeLessThanOrEqual(100);
   });
 
   it("rejects foreign or malformed ids", () => {
     expect(parseCustomId("something|else|3")).toBeNull();
-    expect(parseCustomId("app|open|nope")).toBeNull();
-    expect(parseCustomId("app|open|1")).toBeNull();
+    expect(parseCustomId("app|reopen|nope")).toBeNull();
+    expect(parseCustomId("app|reopen|1")).toBeNull();
     expect(parseCustomId("app|delete|12")).toBeNull();
   });
 });
@@ -83,10 +82,10 @@ describe("isDancer", () => {
 });
 
 describe("buildIntakeMessage — routing", () => {
-  it("gives a dancer a card with an Open row button", () => {
-    const msg = buildIntakeMessage(makeRow(), opts());
+  it("gives a dancer an embed card, with a sheet link when one is configured", () => {
+    const msg = buildIntakeMessage(makeRow(), opts({ sheetUrl: "https://example.com/s" }));
     expect(msg.embeds).toHaveLength(1);
-    expect(JSON.stringify(msg.components)).toContain("app|open|12");
+    expect(JSON.stringify(msg.components)).toContain("https://example.com/s");
   });
 
   it("gives a videographer one line, not a review card", () => {
@@ -97,7 +96,7 @@ describe("buildIntakeMessage — routing", () => {
 
   it("tells a videographer's card that the workflow ends there", () => {
     const msg = buildIntakeMessage(makeRow({ type: "Videographer / editor" }), opts());
-    expect(msg.content).toContain("no review, no interview");
+    expect(msg.content).toContain("Gotta do this one manually");
   });
 
   it("offers a videographer a reply draft and a sheet link, and nothing else", () => {
@@ -198,11 +197,11 @@ describe("card states", () => {
 describe("video groups on the card", () => {
   const groups: VideoGroup[] = [
     {
-      label: "Boy Group — CREW",
+      label: "Boy Group",
       links: [{ url: "https://youtu.be/aaa", label: "", access: "public" }],
     },
     {
-      label: "Girl Group — SOLO",
+      label: "Girl Group",
       links: [
         {
           url: "https://drive.google.com/file/d/1A/view",
@@ -215,8 +214,8 @@ describe("video groups on the card", () => {
 
   it("keeps each column's category as a heading", () => {
     const desc = firstEmbedDescription(buildIntakeMessage(makeRow(), opts({ videos: groups })));
-    expect(desc).toContain("**Boy Group — CREW**");
-    expect(desc).toContain("**Girl Group — SOLO**");
+    expect(desc).toContain("**Boy Group**");
+    expect(desc).toContain("**Girl Group**");
   });
 
   it("flags restricted links and keeps in-cell annotations", () => {
@@ -281,27 +280,6 @@ describe("card fields", () => {
   });
 });
 
-describe("buildOpenRowResponse", () => {
-  it("skips empty cells and pairs headers with values", () => {
-    const msg = buildOpenRowResponse(
-      12,
-      ["Timestamp", "Score", "Email Address", "Type", "Name"],
-      ["2026-09-01", "", "a@b.com", "Dancer", "Mimi"],
-    );
-    const desc = firstEmbedDescription(msg);
-    expect(desc).toContain("Email Address");
-    expect(desc).not.toContain("Score");
-  });
-
-  it("stays inside the embed description limit on a long row", () => {
-    const headers = Array.from({ length: 60 }, (_, i) => `Question ${i}`);
-    const values = Array.from({ length: 60 }, () => "x".repeat(400));
-    const desc = firstEmbedDescription(buildOpenRowResponse(12, headers, values));
-    expect(desc.length).toBeLessThanOrEqual(4096);
-    expect(desc).toContain("too long to show");
-  });
-});
-
 describe("when decision buttons appear", () => {
   const withDecision = (state: CardState, decision = emptyDecision()) =>
     buildIntakeMessage(
@@ -321,7 +299,7 @@ describe("when decision buttons appear", () => {
   it("hides them while a RISK-process applicant hasn't submitted", () => {
     const ids = buttonIds(withDecision("awaiting"));
     expect(ids).not.toContain("app|vote|12");
-    expect(ids).toContain("app|open|12");
+    expect(ids).not.toContain("app|feedback|12");
   });
 
   it("says voting opens once the audition arrives", () => {
@@ -346,7 +324,7 @@ describe("when decision buttons appear", () => {
 });
 
 describe("split votes on the card", () => {
-  const split = (over: Partial<Decision> = {}) =>
+  const split = (over: Partial<Decision> = {}, revealed = true) =>
     buildIntakeMessage(
       makeRow(),
       opts({
@@ -354,6 +332,7 @@ describe("split votes on the card", () => {
         decision: { ...emptyDecision(), ballots: { d1: ["Hearts"], d2: [] }, ...over },
         directorIds: ["d1", "d2"],
         minVotes: 2,
+        outcomesRevealed: revealed,
       }),
     );
 
@@ -361,13 +340,42 @@ describe("split votes on the card", () => {
     (msg.components as { components: { custom_id?: string; disabled?: boolean }[] }[])
       .flatMap((row) => row.components);
 
-  it("locks the ballot and offers a recorded outcome instead", () => {
+  it("locks the ballot and asks for a decided placement instead", () => {
     const all = buttons(split());
     const vote = all.find((b) => b.custom_id === "app|vote|12");
     expect(vote?.disabled).toBe(true);
     expect(all.map((b) => b.custom_id)).toEqual(
-      expect.arrayContaining(["app|final-yes|12", "app|final-no|12"]),
+      expect.arrayContaining(["app|final-placement|12", "app|final-no|12"]),
     );
+  });
+
+  /**
+   * The yes side of a split has to say what was agreed. The ballots can't
+   * supply it — they are the disagreement — so a bare button would settle the
+   * discussion while losing its conclusion.
+   */
+  it("no longer offers a yes that records nothing", () => {
+    expect(buttons(split()).map((b) => b.custom_id)).not.toContain("app|final-yes|12");
+  });
+
+  it("offers only the subunits they auditioned for", () => {
+    const msg = buildIntakeMessage(
+      makeRow({ fields: { I: "Hearts, Clubs" } }),
+      opts({
+        state: "open",
+        decision: { ...emptyDecision(), ballots: { d1: ["Hearts"], d2: [] } },
+        directorIds: ["d1", "d2"],
+        minVotes: 2,
+      }),
+    );
+    const select = (
+      msg.components as {
+        components: { custom_id?: string; options?: { value: string }[] }[];
+      }[]
+    )
+      .flatMap((r) => r.components)
+      .find((c) => c.custom_id === "app|final-placement|12");
+    expect(select?.options?.map((o) => o.value)).toEqual(["Hearts", "Clubs"]);
   });
 
   it("leaves feedback available during the discussion", () => {
@@ -424,6 +432,7 @@ describe("outcome buttons", () => {
         decision: { ...emptyDecision(), ballots },
         directorIds: Object.keys(ballots),
         minVotes: 1,
+        outcomesRevealed: true,
         ...over,
       }),
     );
@@ -599,6 +608,88 @@ describe("interview buttons", () => {
   });
 });
 
+describe("a videographer's submitted work", () => {
+  const oneLiner = (work?: string) =>
+    buildIntakeMessage(
+      makeRow({ type: "Videographer / editor", ...(work ? { videos: { AJ: work } } : {}) }),
+      opts(),
+    ).content as string;
+
+  it("lists every link they submitted", () => {
+    const content = oneLiner("https://youtu.be/reel1\nhttps://youtu.be/reel2");
+    expect(content).toContain("https://youtu.be/reel1");
+    expect(content).toContain("https://youtu.be/reel2");
+  });
+
+  it("keeps the note they wrote alongside a link", () => {
+    expect(oneLiner("wedding reel: https://youtu.be/reel1")).toContain("wedding reel");
+  });
+
+  /** "my portfolio is on my IG" is still an answer worth showing. */
+  it("shows plain text when there's no link in it", () => {
+    expect(oneLiner("ask me for my portfolio")).toContain("ask me for my portfolio");
+  });
+
+  it("says so when they submitted nothing", () => {
+    expect(oneLiner()).toContain("no submissions on the form");
+  });
+
+  /** Several reels unfurling turns the review channel into a wall. */
+  it("suppresses link previews", () => {
+    const msg = buildIntakeMessage(
+      makeRow({ type: "Videographer / editor", videos: { AJ: "https://youtu.be/reel1" } }),
+      opts(),
+    );
+    expect(msg.flags).toBe(4);
+  });
+});
+
+describe("a card closed by its outcome", () => {
+  const sentOutcome = {
+    outcome: "welcomed" as const,
+    by: "d1",
+    at: "2026-09-10T00:00:00Z",
+    sentAt: "2026-09-10T00:05:00Z",
+    subunits: ["Hearts"],
+  };
+
+  const closed = (over: Partial<CardOptions> = {}) =>
+    buildIntakeMessage(
+      makeRow({ method: "RISK Audition process" }),
+      opts({ state: "closed", outcome: sentOutcome, ...over }),
+    );
+
+  it("doesn't claim an audition form never arrived", () => {
+    const desc = firstEmbedDescription(closed());
+    expect(desc).toContain("the decision went out");
+    expect(desc).not.toContain("arrived in time");
+  });
+
+  it("still says the old thing when it really was a timeout", () => {
+    const desc = firstEmbedDescription(
+      buildIntakeMessage(makeRow({ method: "RISK Audition process" }), opts({ state: "closed" })),
+    );
+    expect(desc).toContain("arrived in time");
+  });
+
+  /** The interview happened; a closed card shouldn't read as if it hadn't. */
+  it("keeps the interview on the record", () => {
+    const desc = firstEmbedDescription(
+      closed({
+        interview: {
+          state: "scheduled",
+          date: "2026-09-11",
+          time: "14:30",
+          durationMinutes: 30,
+          draftedBy: "d1",
+          draftedAt: "2026-09-09T00:00:00Z",
+        },
+      }),
+    );
+    expect(desc).toContain("Interview scheduled");
+  });
+});
+
 describe("placement select", () => {
   const pendingCard = (outcome: "welcomed" | "rejected" | "waitlisted", appliedFor: string) =>
     buildIntakeMessage(
@@ -627,9 +718,9 @@ describe("placement select", () => {
     expect(options?.map((o) => o.value)).toEqual(["Hearts", "Clubs"]);
   });
 
-  it("falls back to all three rather than blocking on an odd answer", () => {
+  it("falls back to every subunit rather than blocking on an odd answer", () => {
     const options = select(pendingCard("welcomed", "whichever you think"))?.options;
-    expect(options?.map((o) => o.value)).toEqual(["Spades", "Hearts", "Clubs"]);
+    expect(options?.map((o) => o.value)).toEqual([...SUBUNITS]);
   });
 
   it("appears for a waitlist too, since that records an offer", () => {
@@ -638,6 +729,52 @@ describe("placement select", () => {
 
   it("never appears for a rejection, which has no placement", () => {
     expect(select(pendingCard("rejected", "Spades"))).toBeUndefined();
+  });
+
+  /**
+   * The bug this pins: a string select only fires on *change*, so a seeded
+   * placement had no way to be accepted as-is. Re-clicking the highlighted
+   * option deselects it.
+   */
+  describe("confirming a seeded placement", () => {
+    const seeded = (subunits?: string[]) =>
+      buildIntakeMessage(
+        makeRow({ fields: { I: "Hearts, Clubs" } }),
+        opts({
+          state: "open",
+          decision: { ...emptyDecision(), ballots: { d1: ["Hearts"] } },
+          directorIds: ["d1"],
+          minVotes: 1,
+          pending: { outcome: "welcomed", startedBy: "d1", ...(subunits ? { subunits } : {}) },
+        }),
+      );
+
+    const ids = (msg: MessagePayload): string[] =>
+      (msg.components as { components: { custom_id?: string }[] }[])
+        .flatMap((row) => row.components)
+        .map((c) => c.custom_id ?? "")
+        .filter(Boolean);
+
+    it("offers a confirm button when the vote seeded a placement", () => {
+      expect(ids(seeded(["Hearts"]))).toContain("app|placement-confirm|12");
+    });
+
+    it("names what it would confirm", () => {
+      const button = (seeded(["Hearts", "Clubs"]).components as {
+        components: { custom_id?: string; label?: string }[];
+      }[])
+        .flatMap((row) => row.components)
+        .find((c) => c.custom_id === "app|placement-confirm|12");
+      expect(button?.label).toBe("Confirm Hearts + Clubs");
+    });
+
+    it("offers nothing to confirm when the vote agreed nothing", () => {
+      expect(ids(seeded())).not.toContain("app|placement-confirm|12");
+    });
+
+    it("leaves the select available for changing the placement", () => {
+      expect(ids(seeded(["Hearts"]))).toContain("app|placement|12");
+    });
   });
 
   it("says on the card what it's waiting for", () => {
@@ -672,11 +809,10 @@ describe("resolving a split", () => {
       .flatMap((r) => r.components)
       .map((b) => b.label ?? "");
 
-  it("names the buttons by what happens next, not by which way the vote went", () => {
-    expect(labelsOf(split())).toEqual(
-      expect.arrayContaining(["Move onto Interview", "Reject from RISK"]),
-    );
+  it("names the choice by what happens next, not by which way the vote went", () => {
+    expect(labelsOf(split())).toEqual(expect.arrayContaining(["Reject from RISK"]));
     expect(labelsOf(split())).not.toContain("Final Yes");
+    expect(labelsOf(split())).not.toContain("Move onto Interview");
   });
 
   it("offers no outcome buttons until the split is settled", () => {
@@ -777,5 +913,83 @@ describe("placement pre-selection", () => {
 
   it("selects nothing after a split, where nothing was agreed", () => {
     expect(chosen(seeded())).toEqual([]);
+  });
+});
+
+describe("skipping the interview", () => {
+  const accepted = (revealed?: boolean) =>
+    buildIntakeMessage(
+      makeRow(),
+      opts({
+        state: "open",
+        decision: { ...emptyDecision(), ballots: { d1: ["Hearts"] } },
+        directorIds: ["d1"],
+        minVotes: 1,
+        ...(revealed === undefined ? {} : { outcomesRevealed: revealed }),
+      }),
+    );
+
+  const ids = (msg: MessagePayload): string[] =>
+    (msg.components as { components: { custom_id?: string }[] }[])
+      .flatMap((r) => r.components)
+      .map((b) => b.custom_id ?? "");
+
+  it("offers one way past the interview, not three", () => {
+    const shown = ids(accepted());
+    expect(shown).toContain("app|interview|12");
+    expect(shown).toContain("app|skip-interview|12");
+    expect(shown.some((id) => id.startsWith("app|outcome-"))).toBe(false);
+  });
+
+  it("reveals the three outcomes once someone skips", () => {
+    const shown = ids(accepted(true));
+    expect(shown).toEqual(
+      expect.arrayContaining([
+        "app|outcome-welcome|12",
+        "app|outcome-reject|12",
+        "app|outcome-waitlist|12",
+      ]),
+    );
+    expect(shown).not.toContain("app|skip-interview|12");
+  });
+
+  it("keeps the interview available after skipping, in case that was wrong", () => {
+    expect(ids(accepted(true))).toContain("app|interview|12");
+  });
+
+  it("shows outcomes without skipping once an interview is scheduled", () => {
+    const msg = buildIntakeMessage(
+      makeRow(),
+      opts({
+        state: "open",
+        decision: { ...emptyDecision(), ballots: { d1: ["Hearts"] } },
+        directorIds: ["d1"],
+        minVotes: 1,
+        interview: {
+          state: "scheduled",
+          date: "2026-09-20",
+          time: "14:30",
+          durationMinutes: 30,
+          draftedBy: "d1",
+          draftedAt: "x",
+        },
+      }),
+    );
+    expect(ids(msg)).toContain("app|outcome-welcome|12");
+    expect(ids(msg)).not.toContain("app|skip-interview|12");
+  });
+
+  it("needs no skip on a rejected card, which never had an interview", () => {
+    const msg = buildIntakeMessage(
+      makeRow(),
+      opts({
+        state: "open",
+        decision: { ...emptyDecision(), ballots: { d1: [] } },
+        directorIds: ["d1"],
+        minVotes: 1,
+      }),
+    );
+    expect(ids(msg)).toContain("app|outcome-reject|12");
+    expect(ids(msg)).not.toContain("app|skip-interview|12");
   });
 });

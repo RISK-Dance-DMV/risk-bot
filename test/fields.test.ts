@@ -136,3 +136,31 @@ describe("wantsFeedback", () => {
     expect(wantsFeedback("yesterday")).toBe(false);
   });
 });
+
+describe("finding the applicant's name", () => {
+  const rowWith = (cells: Record<number, string>) => {
+    const values = new Array(30).fill("");
+    for (const [i, text] of Object.entries(cells)) values[Number(i)] = text;
+    return parseRow(12, values as string[]);
+  };
+
+  it("reads the dancer branch's Name column", () => {
+    expect(rowWith({ 4: "Alina One" }).name).toBe("Alina One");
+  });
+
+  /**
+   * The form asks for a name *after* branching on applicant type, so each
+   * branch has its own column. A videographer leaves E empty.
+   */
+  it("falls through to the videographer branch's column", () => {
+    expect(rowWith({ 22: "Alina Two" }).name).toBe("Alina Two");
+  });
+
+  it("prefers the first branch that answered when both somehow did", () => {
+    expect(rowWith({ 4: "Alina One", 22: "Alina Two" }).name).toBe("Alina One");
+  });
+
+  it("still reports nothing when no branch has a name", () => {
+    expect(rowWith({}).name).toBe("");
+  });
+});

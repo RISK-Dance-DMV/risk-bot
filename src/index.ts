@@ -1,7 +1,6 @@
 import { runAuditionReconcile, handleAuditionSubmit } from "./applications/auditions";
 import { runBackstop } from "./applications/backstop";
 import {
-  buildOpenRowResponse,
   isDirectorAction,
   parseCustomId,
   VOTE_NONE,
@@ -28,6 +27,7 @@ import {
   needsPlacement,
   outcomeFeedbackModal,
   readOutcomeModal,
+  revealOutcomes,
   setPlacement,
 } from "./applications/outcome";
 import { draftReply, readReplyModal, replyModalFor } from "./applications/reply";
@@ -38,6 +38,7 @@ import {
   feedbackModalResponse,
   modalFeedbackValue,
   recordFinal,
+  recordFinalPlacement,
   rejectAfterDiscussion,
   saveFeedback,
 } from "./applications/vote";
@@ -50,20 +51,47 @@ import {
 } from "./drafts/draft";
 import {
   approveDraft,
-  editAndPublishDraft,
+  saveDraftEdit,
   getDraft,
   skipDraft,
   sweepDrafts,
 } from "./drafts/service";
 import { ephemeral, json, modalValue } from "./discord/respond";
 import { getDirectorIds, isDirector } from "./config/directors";
+import { runAuditionDeadlines } from "./trainees/auditionFlow";
+import {
+  runBookingWindow,
+  runCyclePrompt,
+  runPollClose,
+  runAuditionsOpen,
+  runSessionReminders,
+} from "./cycles/cycleFlow";
+import {
+  cycleComponent,
+  handleCycleCommand,
+  handleCycleComponent,
+} from "./cycles/cycleHandlers";
+import {
+  auditionComponent,
+  handleAuditionCommand,
+  handleAuditionComponent,
+} from "./trainees/auditionHandlers";
+import {
+  diamondsComponent,
+  handleDiamondsCommand,
+  handleDiamondsComponent,
+} from "./diamonds/handlers";
+import { runDiamondsDaily } from "./diamonds/flow";
+import { CARD_COLUMNS } from "./config/columns";
+import { presumedPlacement } from "./config/subunits";
+import { cell } from "./applications/fields";
 import { handleFormRegister } from "./commands/formRegister";
 import { declineReason } from "./commands/gate";
 import { subcommandOf } from "./commands/options";
 import { isFormType } from "./config/forms";
 import { readApplications, type SheetPage, type SheetRow } from "./appsScript";
 import { isEnabled } from "./config/flags";
-import { alertDirectors, editOriginalResponse } from "./discord/rest";
+import { alertDirectors, editOriginalResponse, followUp } from "./discord/rest";
 import { ComponentType, MODAL_TEXT_LIMIT, TextInputStyle } from "./discord/types";
 import {
   InteractionResponseType,
@@ -102,17 +130,6 @@ async function loadRow(
   return { page, sheetRow };
 }
 
-async function handleOpenRow(env: Env, row: number): Promise<MessagePayload> {
-  const loaded = await loadRow(env, row);
-  if ("error" in loaded) return { content: loaded.error };
-  return buildOpenRowResponse(
-    row,
-    loaded.page.headers,
-    loaded.sheetRow.values,
-    sheetRowUrl(env, row),
-  );
-}
-
 async function handleReopen(env: Env, row: number): Promise<MessagePayload> {
   const record = await getRecord(env, row);
   if (!record) return { content: `No card on record for row ${row}.` };
@@ -122,6 +139,16 @@ async function handleReopen(env: Env, row: number): Promise<MessagePayload> {
 
   const loaded = await loadRow(env, row);
   if ("error" in loaded) return { content: loaded.error };
+
+  // A card closed by its outcome goes back to whatever it was, with its clock
+  // untouched — there is no audition-form window to restart, and restarting one
+  // would have the sweep close it again in a fortnight.
+  if (record.closedFrom) {
+    await setCardState(env, record, record.closedFrom, loaded.sheetRow);
+    return {
+      content: `Reopened row ${row} as \`${record.closedFrom}\`. The outcome that was sent still stands on the card.`,
+    };
+  }
 
   const updated = await setCardState(env, record, "awaiting", loaded.sheetRow, true);
   const due = await dueAt(env, new Date(updated.waitingSince));
@@ -142,8 +169,7 @@ async function respondDeferred(
 ): Promise<void> {
   let payload: MessagePayload;
   try {
-    payload =
-      action === "reopen" ? await handleReopen(env, row) : await handleOpenRow(env, row);
+    payload = await handleReopen(env, row);
   } catch (err) {
     payload = {
       content: `Couldn't ${action} row ${row}: ${err instanceof Error ? err.message : String(err)}`,
@@ -185,6 +211,17 @@ async function handleCommand(
   ctx: ExecutionContext,
 ): Promise<Response> {
   const name = interaction.data?.name;
+
+  // Rank 12 lives in the dance guild and is trainee-facing, so it does its own
+  // gating: the channel allowlist is #trainee-bot and the roster is coaches,
+  // neither of which declineReason knows about.
+  if (name === "audition") return handleAuditionCommand(env, interaction, ctx);
+  if (name === "cycle") return handleCycleCommand(env, interaction, ctx);
+  // Diamonds does its own gating too, and for a third set of reasons: the
+  // channel is #diamonds-bot, five of the subcommands are for the people
+  // auditioning, and the other five are directors only.
+  if (name === "diamonds") return handleDiamondsCommand(env, interaction, ctx);
+
   if (name !== "form" && name !== "waitlist") {
     return json({
       type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
@@ -254,6 +291,8 @@ async function applyDecisionAction(
     }
     case "final-yes":
       return recordFinal(env, row, userId, "yes");
+    case "skip-interview":
+      return revealOutcomes(env, row);
     default:
       return;
   }
@@ -324,12 +363,27 @@ async function handleDecision(
     return json(await replyModalFor(env, row));
   }
 
+  // The placement a discussion landed on. Recorded straight away, because the
+  // card it came from is about to stop offering it.
+  if (action === "final-placement") {
+    const chosen = interaction.data?.values ?? [];
+    if (chosen.length === 0) {
+      return json(ephemeral("Pick at least one subunit, or use Reject from RISK."));
+    }
+    ctx.waitUntil(
+      recordFinalPlacement(env, row, userId, chosen).catch((err) =>
+        console.error("final placement failed", row, err),
+      ),
+    );
+    return json({ type: InteractionResponseType.DEFERRED_UPDATE_MESSAGE });
+  }
+
   // Rejecting after a discussion settles the split and opens the rejection in
   // one move — the decision and telling them are the same act.
   if (action === "final-no") {
     const updated = await rejectAfterDiscussion(env, row, userId);
     if (!updated) return json(ephemeral(`Row ${row} isn't open for decisions.`));
-    return json(outcomeFeedbackModal(row, updated));
+    return json(outcomeFeedbackModal(row, updated, directorIds));
   }
 
   // The three outcome buttons open a short flow rather than acting immediately:
@@ -346,13 +400,53 @@ async function handleDecision(
           ? "rejected"
           : "waitlisted";
 
-    const begun = await beginOutcome(env, row, userId, outcome);
-    if (begun.snoozed) return json(ephemeral(begun.message.content ?? "Done."));
+    // A rejection needs no placement, so it goes straight to composing the
+    // message — and a modal has to be the immediate response, so that one is
+    // paid for synchronously.
+    if (!needsPlacement(outcome)) {
+      const begun = await beginOutcome(env, row, userId, outcome);
+      return begun.snoozed
+        ? json(ephemeral(begun.message.content ?? "Done."))
+        : json(outcomeFeedbackModal(row, begun.record, directorIds));
+    }
 
-    // A rejection needs no placement, so go straight to composing the message.
-    return needsPlacement(outcome)
-      ? json({ type: InteractionResponseType.DEFERRED_UPDATE_MESSAGE })
-      : json(outcomeFeedbackModal(row, begun.record));
+    // Everything else acknowledges first. beginOutcome reads KV three times and
+    // repaints the card over the Discord API; doing that before answering can
+    // overrun the 3s budget, and a blown budget looks exactly like the button
+    // doing nothing.
+    ctx.waitUntil(
+      (async () => {
+        const begun = await beginOutcome(env, row, userId, outcome);
+        if (begun.snoozed) {
+          await followUp(env, interaction.application_id, interaction.token, {
+            content: begun.message.content ?? "Done.",
+            flags: MessageFlags.EPHEMERAL,
+          });
+        }
+      })().catch((err) => console.error("beginOutcome failed", outcome, row, err)),
+    );
+    return json({ type: InteractionResponseType.DEFERRED_UPDATE_MESSAGE });
+  }
+
+  // Keeping the seeded placement. The select can't express "unchanged", so the
+  // button says it instead.
+  if (action === "placement-confirm") {
+    const record = await getRecord(env, row);
+    if (!record?.values) return json(ephemeral(`Row ${row} isn't on file.`));
+
+    const column = CARD_COLUMNS.find((c) => c.key === "subunits")?.column ?? null;
+    const presumed = presumedPlacement(cell(record.values, column), record.pending?.subunits);
+    if (presumed.length === 0) {
+      return json(ephemeral("There's more than one option here — pick from the menu."));
+    }
+
+    // Written through setPlacement rather than trusting whatever was seeded, so
+    // the recorded placement and the button's label can't drift apart.
+    const updated = await setPlacement(env, row, presumed);
+    if (!updated) {
+      return json(ephemeral("That decision timed out — press the button again."));
+    }
+    return json(outcomeFeedbackModal(row, updated, directorIds));
   }
 
   // Placement chosen — the select's own interaction opens the feedback modal.
@@ -362,7 +456,7 @@ async function handleDecision(
     if (!updated) {
       return json(ephemeral("That decision timed out — press the button again."));
     }
-    return json(outcomeFeedbackModal(row, updated));
+    return json(outcomeFeedbackModal(row, updated, directorIds));
   }
 
   // These can fail in ways worth reading — a bad date, a missing template — so
@@ -401,7 +495,7 @@ function draftEditModal(id: string, content: string): unknown {
     type: InteractionResponseType.MODAL,
     data: {
       custom_id: `draft|edit-save|${id}`,
-      title: "Edit before publishing",
+      title: "Edit draft — saves, doesn't send",
       components: [
         {
           type: ComponentType.ACTION_ROW,
@@ -410,7 +504,7 @@ function draftEditModal(id: string, content: string): unknown {
               type: ComponentType.TEXT_INPUT,
               custom_id: EDIT_INPUT_ID,
               style: TextInputStyle.PARAGRAPH,
-              label: "Message",
+              label: "Message (approve separately to send)",
               // Modal fields cap at 4000, but a published message caps at 2000.
               max_length: Math.min(MODAL_TEXT_LIMIT, CONTENT_LIMIT),
               required: true,
@@ -459,14 +553,16 @@ async function handleDraftAction(
             ? await approveDraft(env, id, actor)
             : action === "skip"
               ? await skipDraft(env, id, actor)
-              : await editAndPublishDraft(env, id, actor, modalValue(interaction, EDIT_INPUT_ID));
+              : await saveDraftEdit(env, id, actor, modalValue(interaction, EDIT_INPUT_ID));
 
         payload = result.ok
           ? {
               content:
                 result.draft.state === "skipped"
                   ? "Skipped — nothing was sent or published."
-                  : `Delivered to ${describeTarget(result.draft.target)}.`,
+                  : action === "edit-save"
+                    ? `Saved. **Still not sent** — click Approve when it reads right.`
+                    : `Delivered to ${describeTarget(result.draft.target)}.`,
             }
           : { content: result.reason };
       } catch (err) {
@@ -508,6 +604,40 @@ async function handleInteraction(
       return handleDraftAction(env, interaction, ctx, draftAction.action, draftAction.id);
     }
 
+    const audition = auditionComponent(interaction.data?.custom_id ?? "");
+    if (audition) {
+      return handleAuditionComponent(
+        env,
+        interaction,
+        ctx,
+        audition.action,
+        audition.auditionId,
+      );
+    }
+
+    const diamonds = diamondsComponent(interaction.data?.custom_id ?? "");
+    if (diamonds) {
+      return handleDiamondsComponent(
+        env,
+        interaction,
+        ctx,
+        diamonds.action,
+        diamonds.arg,
+      );
+    }
+
+    const cycle = cycleComponent(interaction.data?.custom_id ?? "");
+    if (cycle) {
+      return handleCycleComponent(
+        env,
+        interaction,
+        ctx,
+        cycle.action,
+        cycle.cycleId,
+        cycle.extra,
+      );
+    }
+
     const parsed = parseCustomId(interaction.data?.custom_id ?? "");
     if (parsed) {
       if (!(await isEnabled(env, "applications"))) {
@@ -525,6 +655,33 @@ async function handleInteraction(
   }
 
   if (interaction.type === InteractionType.MODAL_SUBMIT) {
+    const audition = auditionComponent(interaction.data?.custom_id ?? "");
+    if (audition) {
+      return handleAuditionComponent(
+        env,
+        interaction,
+        ctx,
+        audition.action,
+        audition.auditionId,
+      );
+    }
+
+    const diamonds = diamondsComponent(interaction.data?.custom_id ?? "");
+    if (diamonds) {
+      return handleDiamondsComponent(
+        env,
+        interaction,
+        ctx,
+        diamonds.action,
+        diamonds.arg,
+      );
+    }
+
+    const cycle = cycleComponent(interaction.data?.custom_id ?? "");
+    if (cycle) {
+      return handleCycleComponent(env, interaction, ctx, cycle.action, cycle.cycleId);
+    }
+
     const draftAction = parseDraftCustomId(interaction.data?.custom_id ?? "");
     if (draftAction?.action === "edit-save") {
       return handleDraftAction(env, interaction, ctx, "edit-save", draftAction.id);
@@ -645,6 +802,31 @@ export default {
           ),
         );
         return json({ ok: true, accepted: row });
+      }
+
+      case "/jobs/trainee-daily": {
+        const denied = authorizeInbound(request, env);
+        if (denied) return denied;
+        // Kept off /jobs/applications-daily: that one is about applicants and
+        // this one is about trainees, and a failure in either shouldn't be
+        // reported as the other having gone wrong.
+        return runJobs(env, [
+          ["audition deadlines", () => runAuditionDeadlines(env)],
+          ["cycle prompt", () => runCyclePrompt(env)],
+          ["poll close", () => runPollClose(env)],
+          ["booking window", () => runBookingWindow(env)],
+          ["session reminders", () => runSessionReminders(env)],
+          ["auditions open", () => runAuditionsOpen(env)],
+        ]);
+      }
+
+      case "/jobs/diamonds-daily": {
+        const denied = authorizeInbound(request, env);
+        if (denied) return denied;
+        // Its own endpoint rather than a line in trainee-daily: the Diamonds
+        // audition isn't the trainee program, and a Diamonds reminder failing
+        // shouldn't be reported as a trainee deadline having gone wrong.
+        return runJobs(env, [["diamonds", () => runDiamondsDaily(env)]]);
       }
 
       case "/jobs/drafts-sweep": {

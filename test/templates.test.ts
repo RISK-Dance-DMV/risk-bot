@@ -6,6 +6,7 @@ import {
   missingTemplates,
   parseTemplates,
   renderTemplate,
+  tidyBody,
   type Template,
 } from "../src/email/templates";
 import type { SheetPage } from "../src/appsScript";
@@ -157,5 +158,77 @@ describe("merge fields that a narrow pattern would miss", () => {
       { "date, time": "Sunday 2pm" },
     );
     expect(result).toMatchObject({ ok: true, body: "does Sunday 2pm work?" });
+  });
+});
+
+describe("tidyBody", () => {
+  it("collapses the blank runs Gmail hides behind a ••• toggle", () => {
+    expect(tidyBody("here:\n\nfeedback\n\n\n\n\nWe hope")).toBe(
+      "here:\n\nfeedback\n\nWe hope",
+    );
+  });
+
+  it("keeps ordinary paragraph breaks", () => {
+    expect(tidyBody("one\n\ntwo\nthree")).toBe("one\n\ntwo\nthree");
+  });
+
+  it("drops trailing spaces that render as ragged indentation", () => {
+    expect(tidyBody("line one   \nline two\t")).toBe("line one\nline two");
+  });
+
+  /**
+   * The case that survived the first fix. Text pasted into the sheet from
+   * Google Docs carries non-breaking spaces, so a line that looks blank isn't,
+   * and a plain \n{3,} collapse never matches it.
+   */
+  it("collapses blank lines that are holding a non-breaking space", () => {
+    expect(tidyBody("its ok\n\u00a0\n\u00a0\n\u00a0\nWe hope")).toBe("its ok\n\nWe hope");
+  });
+
+  it("collapses blank lines holding zero-width characters", () => {
+    expect(tidyBody("a\n\u200b\n\u200b\nb")).toBe("a\n\nb");
+  });
+
+  it("keeps a non-breaking space that's doing real work mid-sentence", () => {
+    expect(tidyBody("Spades\u00a0(boy group unit)")).toBe("Spades (boy group unit)");
+  });
+
+  it("normalises spreadsheet line endings", () => {
+    expect(tidyBody("a\r\n\r\n\r\n\r\nb")).toBe("a\n\nb");
+  });
+
+  it("runs as part of rendering, so the draft matches the email", () => {
+    const rendered = renderTemplate(
+      { key: "acceptance", subject: "Welcome", body: "Hi {{name}},\n\n\n\n\nsee you" },
+      { name: "Mimi" },
+    );
+    expect(rendered).toMatchObject({ ok: true, body: "Hi Mimi,\n\nsee you" });
+  });
+});
+
+describe("why a merge field didn't fill", () => {
+  const template = { key: "acceptance", subject: "Welcome", body: "Hi {{name}}. {{FEEDBACK}}" };
+
+  it("says so when the value was supplied but blank", () => {
+    const result = renderTemplate(template, { name: "Mimi", feedback: "" });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toContain("you left that box empty");
+  });
+
+  it("says something different when nothing supplies the field at all", () => {
+    const result = renderTemplate(template, { name: "Mimi" });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toContain("check the spelling in the sheet");
+  });
+
+  it("still refuses rather than sending a sentence that trails off", () => {
+    expect(renderTemplate(template, { name: "Mimi", feedback: "" }).ok).toBe(false);
+  });
+
+  it("fills normally once there is something to fill with", () => {
+    expect(renderTemplate(template, { name: "Mimi", feedback: "turn around" })).toMatchObject({
+      ok: true,
+      body: "Hi Mimi. turn around",
+    });
   });
 });

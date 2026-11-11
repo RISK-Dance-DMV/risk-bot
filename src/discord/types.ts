@@ -15,7 +15,11 @@ export const InteractionResponseType = {
   MODAL: 9,
 } as const;
 
-export const MessageFlags = { EPHEMERAL: 1 << 6 } as const;
+export const MessageFlags = {
+  /** Hides link previews. A draft quotes its own links; it isn't posting them. */
+  SUPPRESS_EMBEDS: 1 << 2,
+  EPHEMERAL: 1 << 6,
+} as const;
 
 export const ComponentType = {
   ACTION_ROW: 1,
@@ -58,14 +62,28 @@ export interface Interaction {
     /** Modal submissions: action rows wrapping the text inputs. */
     components?: { components?: { custom_id?: string; value?: string }[] }[];
   };
-  member?: { user?: { id: string }; roles?: string[] };
-  user?: { id: string };
+  member?: {
+    user?: { id: string; username?: string; global_name?: string };
+    roles?: string[];
+    nick?: string;
+  };
+  user?: { id: string; username?: string; global_name?: string };
   channel_id?: string;
   guild_id?: string;
 }
 
+/** Native Discord poll, created with the message (max 10 answers). */
+export interface PollRequest {
+  question: { text: string };
+  answers: { poll_media: { text: string } }[];
+  /** Hours. */
+  duration: number;
+  allow_multiselect: boolean;
+}
+
 export interface MessagePayload {
   content?: string;
+  poll?: PollRequest;
   embeds?: unknown[];
   components?: unknown[];
   flags?: number;

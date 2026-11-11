@@ -10,6 +10,7 @@ import {
   outcomeTemplateKey,
   renderDecision,
   renderOutcomeLine,
+  settledPlacement,
   tally,
   type Ballot,
   type Decision,
@@ -195,12 +196,23 @@ describe("feedback", () => {
       },
     );
 
-  it("reports progress without revealing anything", () => {
-    expect(feedbackProgress(withFeedback(["d1", "d2"]), DIRECTORS)).toEqual({
+  it("reports who has written, but not what", () => {
+    const progress = feedbackProgress(withFeedback(["d1", "d2"]), DIRECTORS);
+    expect(progress).toEqual({
       submitted: 2,
       total: 3,
       complete: false,
+      written: ["d1", "d2"],
     });
+    // Names are the whole point; text of any kind here would defeat the seal.
+    expect(JSON.stringify(progress)).not.toContain("wrote");
+  });
+
+  it("names the writers on the card while the text stays sealed", () => {
+    const rendered = renderDecision(withFeedback(["d1"]), DIRECTORS, 2);
+    expect(rendered).toContain("1 of 3 in (<@d1>)");
+    expect(rendered).toContain("text hidden until everyone has written");
+    expect(rendered).not.toContain("wrote");
   });
 
   it("stays hidden until every director has written", () => {
@@ -314,5 +326,43 @@ describe("renderOutcomeLine", () => {
       subunits: ["Hearts", "Clubs"],
     });
     expect(line).toContain("Hearts, Clubs");
+  });
+});
+
+describe("settledPlacement", () => {
+  const split = { d1: ["Hearts"], d2: [], d3: ["Hearts", "Clubs"] };
+
+  it("uses what the discussion decided, not the ballots it disagreed on", () => {
+    const settled = decision(split, {
+      final: { outcome: "yes", by: "d1", at: "x", subunits: ["Hearts"] },
+    });
+    expect(settledPlacement(settled, DIRECTORS)).toEqual(["Hearts"]);
+    // The ballots on their own still supply nothing, which is the point.
+    expect(agreedPlacement(settled, DIRECTORS)).toBeNull();
+  });
+
+  it("is no placement at all when the discussion ended in a rejection", () => {
+    const rejected = decision(split, { final: { outcome: "no", by: "d1", at: "x" } });
+    expect(settledPlacement(rejected, DIRECTORS)).toEqual([]);
+  });
+
+  it("falls back to the vote when nothing was settled by hand", () => {
+    const unanimous = decision({ d1: ["Hearts"], d2: ["Hearts"], d3: ["Hearts"] });
+    expect(settledPlacement(unanimous, DIRECTORS)).toEqual(["Hearts"]);
+  });
+
+  /** Records settled before the placement was asked for carry no subunits. */
+  it("supplies nothing for an older final with no placement on it", () => {
+    const legacy = decision(split, { final: { outcome: "yes", by: "d1", at: "x" } });
+    expect(settledPlacement(legacy, DIRECTORS)).toBeNull();
+  });
+
+  it("names the decided placement on the card", () => {
+    const settled = decision(split, {
+      final: { outcome: "yes", by: "d1", at: "x", subunits: ["Hearts", "Clubs"] },
+    });
+    expect(renderDecision(settled, DIRECTORS, 2)).toContain(
+      "Moving onto interview — Hearts, Clubs",
+    );
   });
 });

@@ -12,6 +12,11 @@ compatibility_date = "2025-06-01"
 GUILD_COMMUNITY_NAME = "RISK Community"
 CH_AUDITION_REVIEW = "audition-review"
 CH_DIRECTORS_CONFIRMATION = "directors-bot-confirmation"
+CH_TRAINEE_BOT = "trainee-bot"
+CH_COACHES_CONFIRMATION = "coaches-bot-confirmation"
+CH_DIAMONDS_BOT = "diamonds-bot"
+# The availability poll goes here, so trainees see it.
+CH_ANNOUNCEMENTS = "announcements"
 
 # Acceptance invites.
 #

@@ -3,6 +3,7 @@ import {
   DEFAULT_MINUTES,
   formatSlot,
   renderInterviewLine,
+  slotInstant,
   validateSlot,
   type InterviewRecord,
 } from "../src/applications/interviewSlot";
@@ -97,5 +98,47 @@ describe("renderInterviewLine", () => {
     for (const state of ["drafted", "offered", "scheduled"] as const) {
       expect(renderInterviewLine(record({ state }))).toContain("Sunday 20 September 2026, 2:30pm");
     }
+  });
+});
+
+describe("slotInstant", () => {
+  const NY = "America/New_York";
+
+  it("reads a typed slot as local, not UTC", () => {
+    // The bug this replaced: `${date}T${time}:00Z` made 2:30pm mean 14:30 UTC,
+    // which Discord then rendered to an Eastern viewer as 10:30am.
+    expect(slotInstant("2026-09-11", "14:30", NY).toISOString()).toBe(
+      "2026-09-11T18:30:00.000Z",
+    );
+  });
+
+  it("uses standard time in winter", () => {
+    expect(slotInstant("2026-01-15", "14:30", NY).toISOString()).toBe(
+      "2026-01-15T19:30:00.000Z",
+    );
+  });
+
+  /**
+   * The reason for the second pass: a naive first guess for a slot just after
+   * the spring-forward lands on the standard-time side of the boundary and
+   * comes out an hour early.
+   */
+  it("is right either side of a DST changeover", () => {
+    expect(slotInstant("2026-03-08", "01:30", NY).toISOString()).toBe(
+      "2026-03-08T06:30:00.000Z",
+    );
+    expect(slotInstant("2026-03-08", "03:30", NY).toISOString()).toBe(
+      "2026-03-08T07:30:00.000Z",
+    );
+  });
+
+  it("handles a zone with a half-hour offset", () => {
+    expect(slotInstant("2026-09-11", "14:30", "Asia/Kolkata").toISOString()).toBe(
+      "2026-09-11T09:00:00.000Z",
+    );
+  });
+
+  it("agrees with the label the director was shown", () => {
+    expect(formatSlot("2026-09-11", "14:30")).toBe("Friday 11 September 2026, 2:30pm");
   });
 });

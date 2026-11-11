@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   formatSubunits,
+  formatSubunitsLong,
   placementOptions,
   subunitsAppliedFor,
+  SUBUNIT_GLOSS,
+  SUBUNITS,
 } from "../src/config/subunits";
 
 describe("subunitsAppliedFor", () => {
@@ -47,9 +50,9 @@ describe("placementOptions", () => {
     });
   });
 
-  it("falls back to all three rather than blocking the decision", () => {
+  it("falls back to every subunit rather than blocking the decision", () => {
     expect(placementOptions("whichever you think")).toEqual({
-      options: ["Spades", "Hearts", "Clubs"],
+      options: [...SUBUNITS],
       fellBack: true,
     });
   });
@@ -64,5 +67,22 @@ describe("formatSubunits", () => {
 
   it("returns nothing for an empty placement", () => {
     expect(formatSubunits([])).toBe("");
+  });
+});
+
+describe("formatSubunitsLong", () => {
+  it("spells out what each unit is, for the applicant", () => {
+    expect(formatSubunitsLong(["Spades"])).toBe("Spades (boy group unit)");
+    expect(formatSubunitsLong(["Hearts", "Clubs"])).toBe(
+      "Hearts (girl group unit) and Clubs (trainee unit)",
+    );
+  });
+
+  it("leaves the director-facing form bare", () => {
+    expect(formatSubunits(["Hearts", "Clubs"])).toBe("Hearts and Clubs");
+  });
+
+  it("glosses every subunit, so adding one can't ship half-labelled", () => {
+    for (const unit of SUBUNITS) expect(SUBUNIT_GLOSS[unit]).toBeTruthy();
   });
 });

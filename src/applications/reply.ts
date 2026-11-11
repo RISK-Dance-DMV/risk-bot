@@ -16,6 +16,7 @@ import {
   type MessagePayload,
 } from "../discord/types";
 import { CONTENT_LIMIT } from "../drafts/draft";
+import { describeConfirmation } from "../drafts/draft";
 import { createDraft } from "../drafts/service";
 import type { Env } from "../env";
 import { cell, parseRow } from "./fields";
@@ -92,10 +93,11 @@ export async function draftReply(
     content: input.body,
     target: { kind: "email", to: email, subject: input.subject.trim() },
     confirmation: { guild: "community", channel: env.CH_AUDITION_REVIEW },
+    confirmationChannelId: record.threadId,
   });
   if (!draft.ok) return { content: `❌ ${draft.reason}` };
 
   return {
-    content: `Drafted a reply to \`${email}\`. **Nothing is sent** until someone approves it in #${env.CH_AUDITION_REVIEW}.`,
+    content: `Drafted a reply to \`${email}\`. **Nothing is sent** until someone approves it ${describeConfirmation(draft.draft, record.threadId)}.`,
   };
 }

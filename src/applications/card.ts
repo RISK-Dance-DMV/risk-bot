@@ -6,8 +6,14 @@ import {
   AUDITION_METHOD_LABEL,
   CARD_COLUMNS,
   DANCER_TYPE_MATCH,
+  VIDEOGRAPHER_WORK_COLUMN,
 } from "../config/columns";
-import { ButtonStyle, ComponentType, type MessagePayload } from "../discord/types";
+import {
+  ButtonStyle,
+  ComponentType,
+  MessageFlags,
+  type MessagePayload,
+} from "../discord/types";
 import {
   decisionStatus,
   feedbackFields,
@@ -21,12 +27,12 @@ import {
   type OutcomeRecord,
   type PendingOutcome,
 } from "./decision";
-import { placementOptions } from "../config/subunits";
+import { placementOptions, presumedPlacement } from "../config/subunits";
 import { cell } from "./fields";
 import type { ApplicationRow } from "./fields";
 import { renderInterviewLine, type InterviewRecord } from "./interviewSlot";
 import { escapeMd, truncate } from "./text";
-import { countLinks, type VideoGroup } from "./videos";
+import { countLinks, extractVideoLinks, type VideoGroup } from "./videos";
 
 const EMBED_FIELD_LIMIT = 1024;
 const EMBED_DESC_LIMIT = 4096;
@@ -62,12 +68,12 @@ export function isDecidable(state: CardState): boolean {
 // ------------------------------------------------------------- custom ids
 
 export type CardAction =
-  | "open"
   | "reopen"
   | "vote"
   | "hold"
   | "final-yes"
   | "final-no"
+  | "final-placement"
   | "feedback"
   | "feedback-save"
   | "interview"
@@ -78,17 +84,19 @@ export type CardAction =
   | "outcome-reject"
   | "outcome-waitlist"
   | "placement"
+  | "placement-confirm"
   | "outcome-save"
   | "reply"
-  | "reply-save";
+  | "reply-save"
+  | "skip-interview";
 
 const ACTIONS: CardAction[] = [
-  "open",
   "reopen",
   "vote",
   "hold",
   "final-yes",
   "final-no",
+  "final-placement",
   "feedback",
   "feedback-save",
   "interview",
@@ -99,9 +107,11 @@ const ACTIONS: CardAction[] = [
   "outcome-reject",
   "outcome-waitlist",
   "placement",
+  "placement-confirm",
   "outcome-save",
   "reply",
   "reply-save",
+  "skip-interview",
 ];
 
 /** Persistent custom_id - the interaction token expires in ~15 min, this does not. */
@@ -128,6 +138,7 @@ export function isDirectorAction(action: CardAction): boolean {
     "hold",
     "final-yes",
     "final-no",
+    "final-placement",
     "feedback",
     "feedback-save",
     "interview",
@@ -138,9 +149,11 @@ export function isDirectorAction(action: CardAction): boolean {
     "outcome-reject",
     "outcome-waitlist",
     "placement",
+    "placement-confirm",
     "outcome-save",
     "reply",
     "reply-save",
+    "skip-interview",
   ].includes(action);
 }
 
@@ -185,6 +198,7 @@ function renderMethodAndVideos(
   state: CardState,
   groups: VideoGroup[],
   dueAt?: Date,
+  outcomeSent = false,
 ): string {
   const method = AUDITION_METHOD_LABEL[row.auditionMethod];
   const parts: string[] = [];
@@ -207,7 +221,11 @@ function renderMethodAndVideos(
     } else if (state === "submitted") {
       parts.push("✅ Audition form submitted.");
     } else if (state === "closed") {
-      parts.push("🔒 **Closed** — no audition form submission arrived in time.");
+      parts.push(
+        outcomeSent
+          ? "🔒 **Closed** — the decision went out; nothing further is owed."
+          : "🔒 **Closed** — no audition form submission arrived in time.",
+      );
     }
   }
 
@@ -235,6 +253,8 @@ export interface CardOptions {
   interview?: InterviewRecord;
   outcome?: OutcomeRecord;
   pending?: PendingOutcome;
+  /** Someone chose to skip the interview, so the outcome buttons are drawn. */
+  outcomesRevealed?: boolean;
 }
 
 /**
@@ -243,6 +263,25 @@ export interface CardOptions {
  * Deliberately a dead end: no votes, no interview, no statuses. The card says so
  * out loud, so nobody goes hunting for a workflow that was never built.
  */
+/**
+ * A videographer's submitted work.
+ *
+ * Links are listed rather than previewed: several reels unfurling into several
+ * embeds turns a list of cards into a wall. Anything that isn't a link is shown
+ * as the text they wrote, because "my portfolio is on my IG" is still an answer.
+ */
+function videographerWork(row: ApplicationRow): string {
+  const raw = cell(row.values, VIDEOGRAPHER_WORK_COLUMN);
+  if (!raw.trim()) return `${DASH} no submissions on the form`;
+
+  const links = extractVideoLinks(raw);
+  if (links.length === 0) return escapeMd(truncate(raw, 400));
+
+  return links
+    .map((link) => (link.label ? `• ${escapeMd(link.label)} ${DASH} ${link.url}` : `• ${link.url}`))
+    .join("\n");
+}
+
 export function buildOneLiner(row: ApplicationRow, sheetUrl?: string): MessagePayload {
   const type = row.applicantType || "unspecified";
   const name = row.name || `(no name, row ${row.row})`;
@@ -267,9 +306,12 @@ export function buildOneLiner(row: ApplicationRow, sheetUrl?: string): MessagePa
   return {
     content: [
       `\u{1F4F9} **${escapeMd(name)}** ${DASH} ${escapeMd(type)} · row ${row.row}`,
-      "_Reply and that's it — no review, no interview._",
+      "**Videography / editing submissions**",
+      videographerWork(row),
+      "_Sorry, no pre-filled text and workflows. Gotta do this one manually! Feel free to draft a reply~_",
     ].join("\n"),
     allowed_mentions: { parse: [] },
+    flags: MessageFlags.SUPPRESS_EMBEDS,
     components: [{ type: ComponentType.ACTION_ROW, components: buttons }],
   };
 }
@@ -362,6 +404,32 @@ function placementRow(
 }
 
 /**
+ * The select alone can't confirm a pre-filled placement.
+ *
+ * A string select only fires when the selection *changes*, so seeding it from
+ * the agreed vote left the one case it was meant to make easy - keep what
+ * everyone voted for - with no way to proceed at all. Re-clicking the
+ * highlighted option deselects it. This button is the "yes, that" the select
+ * can't offer.
+ */
+function placementConfirmRow(
+  row: number,
+  appliedFor: string,
+  pending?: PendingOutcome,
+): Button[] {
+  const seeded = presumedPlacement(appliedFor, pending?.subunits);
+  if (seeded.length === 0) return [];
+  return [
+    {
+      type: ComponentType.BUTTON,
+      style: ButtonStyle.SUCCESS,
+      label: `Confirm ${seeded.join(" + ")}`,
+      custom_id: customId("placement-confirm", row),
+    },
+  ];
+}
+
+/**
  * There is no [Need to discuss] button.
  *
  * A discrepancy already locks the ballot, pings every director and offers the
@@ -391,15 +459,42 @@ function decisionRow(row: number): Button[] {
  * Disappears once the split is resolved: from then on the outcome row carries
  * the decision, so there is exactly one Reject button on the card.
  */
-function finalRow(row: number, decision: Decision, outcome?: OutcomeRecord): Button[] {
-  if (!hasSplit(decision) || decision.final || outcome) return [];
+function splitUnresolved(decision: Decision, outcome?: OutcomeRecord): boolean {
+  return hasSplit(decision) && !decision.final && !outcome;
+}
+
+/**
+ * After a discussion, the placement itself.
+ *
+ * The old [Move onto Interview] button recorded that they'd agreed without
+ * recording what on — and the ballots can't supply it, because they're the
+ * disagreement. So the yes side of a split is a placement, not a button.
+ */
+function finalPlacementRow(
+  row: number,
+  decision: Decision,
+  appliedFor: string,
+  outcome?: OutcomeRecord,
+): Select[] {
+  if (!splitUnresolved(decision, outcome)) return [];
+
+  const { options } = placementOptions(appliedFor);
   return [
     {
-      type: ComponentType.BUTTON,
-      style: ButtonStyle.SUCCESS,
-      label: "Move onto Interview",
-      custom_id: customId("final-yes", row),
+      type: ComponentType.STRING_SELECT,
+      custom_id: customId("final-placement", row),
+      placeholder: "Decided: place them in…",
+      min_values: 1,
+      max_values: options.length,
+      options: options.map((unit) => ({ label: unit, value: unit })),
     },
+  ];
+}
+
+/** The other half of the split: no placement at all. */
+function finalRow(row: number, decision: Decision, outcome?: OutcomeRecord): Button[] {
+  if (!splitUnresolved(decision, outcome)) return [];
+  return [
     {
       type: ComponentType.BUTTON,
       style: ButtonStyle.DANGER,
@@ -417,18 +512,51 @@ function finalRow(row: number, decision: Decision, outcome?: OutcomeRecord): But
  * They stay visible after an outcome is recorded, so a misclick is corrected by
  * pressing another — same idea as [Final Yes] / [Final No].
  */
+function outcomesReachable(
+  status: DecisionStatus,
+  interview?: InterviewRecord,
+  outcome?: OutcomeRecord,
+): boolean {
+  return (
+    !!outcome ||
+    status === "accepted" ||
+    status === "rejected" ||
+    interview?.state === "scheduled"
+  );
+}
+
+/**
+ * Whether the three outcome buttons are actually drawn.
+ *
+ * On a freshly accepted card they aren't: the interview is the expected next
+ * step, and putting four more buttons beside it makes the card a wall of
+ * choices rather than one. They appear once someone says they're skipping the
+ * interview, once an interview is scheduled, or once an outcome exists.
+ *
+ * A rejected card never had an interview to skip, so it gets them straight away.
+ */
+function outcomesShown(
+  status: DecisionStatus,
+  interview?: InterviewRecord,
+  outcome?: OutcomeRecord,
+  revealed?: boolean,
+): boolean {
+  if (!outcomesReachable(status, interview, outcome)) return false;
+  return (
+    !!outcome ||
+    !!revealed ||
+    status === "rejected" ||
+    interview?.state === "scheduled"
+  );
+}
+
 function outcomeRow(
   row: number,
   status: DecisionStatus,
   interview?: InterviewRecord,
   outcome?: OutcomeRecord,
 ): Button[] {
-  const reachable =
-    !!outcome ||
-    status === "accepted" ||
-    status === "rejected" ||
-    interview?.state === "scheduled";
-  if (!reachable) return [];
+  if (!outcomesReachable(status, interview, outcome)) return [];
 
   // A unanimous no shouldn't put a welcome button under someone's thumb.
   const available: ApplicationOutcome[] =
@@ -465,6 +593,7 @@ function interviewRow(
   status: DecisionStatus,
   interview?: InterviewRecord,
   outcome?: OutcomeRecord,
+  outcomesVisible?: boolean,
 ): Button[] {
   // Interviews are for applicants the directors agreed to interview. A rejected,
   // undecided, or already-finished card offers nothing here.
@@ -474,7 +603,7 @@ function interviewRow(
   if (interview?.state !== "scheduled") {
     buttons.push({
       type: ComponentType.BUTTON,
-      style: ButtonStyle.SECONDARY,
+      style: ButtonStyle.PRIMARY,
       label: interview ? "Redraft interview" : "Interview",
       custom_id: customId("interview", row),
     });
@@ -485,6 +614,17 @@ function interviewRow(
       style: ButtonStyle.SUCCESS,
       label: "Interview Confirmed",
       custom_id: customId("interview-confirm", row),
+    });
+  }
+
+  // The way past the interview, for someone you've seen enough of. One button
+  // instead of three, until it's actually the decision being made.
+  if (!outcomesVisible) {
+    buttons.push({
+      type: ComponentType.BUTTON,
+      style: ButtonStyle.SECONDARY,
+      label: "Skip interview — jump to results",
+      custom_id: customId("skip-interview", row),
     });
   }
   return buttons;
@@ -515,8 +655,20 @@ export function buildDancerCard(row: ApplicationRow, opts: CardOptions): Message
     ? decisionStatus(decision, directorIds, minVotes)
     : "new";
 
-  const blocks: string[] = [renderMethodAndVideos(row, opts.state, opts.videos, opts.dueAt)];
-  if (opts.interview && decidable) blocks.push(renderInterviewLine(opts.interview));
+  const blocks: string[] = [
+    renderMethodAndVideos(
+      row,
+      opts.state,
+      opts.videos,
+      opts.dueAt,
+      !!opts.outcome?.sentAt,
+    ),
+  ];
+  // Still shown on a card closed by its outcome - that interview is part of
+  // the record, and hiding it would make the card read as if it never happened.
+  if (opts.interview && (decidable || opts.outcome)) {
+    blocks.push(renderInterviewLine(opts.interview));
+  }
   if (opts.outcome) blocks.push(renderOutcomeLine(opts.outcome));
   if (decision && decidable) {
     blocks.push(renderDecision(decision, directorIds, minVotes));
@@ -532,7 +684,9 @@ export function buildDancerCard(row: ApplicationRow, opts: CardOptions): Message
   const placement = placementRow(row.row, cell(row.values, subunitsColumn), opts.pending);
   if (placement.length > 0) {
     blocks.push(
-      `⏳ **Waiting on placement** — pick below, then write the feedback that goes in the email.`,
+      opts.pending?.subunits?.length
+        ? `⏳ **Waiting on placement** — confirm what the vote agreed, or pick different ones below.`
+        : `⏳ **Waiting on placement** — pick below, then write the feedback that goes in the email.`,
     );
   }
 
@@ -542,19 +696,47 @@ export function buildDancerCard(row: ApplicationRow, opts: CardOptions): Message
   // hidden, which also keeps the whole card inside Discord's five action rows.
   if (placement.length > 0) {
     rows.push(placement);
+    const confirm = placementConfirmRow(
+      row.row,
+      cell(row.values, subunitsColumn),
+      opts.pending,
+    );
+    if (confirm.length > 0) rows.push(confirm);
   } else {
     if (decision && decidable) {
       rows.push(voteRow(row.row, cell(row.values, subunitsColumn), hasSplit(decision)));
       rows.push(decisionRow(row.row));
+      const decided = finalPlacementRow(
+        row.row,
+        decision,
+        cell(row.values, subunitsColumn),
+        opts.outcome,
+      );
+      if (decided.length > 0) rows.push(decided);
       const final = finalRow(row.row, decision, opts.outcome);
       if (final.length > 0) rows.push(final);
     }
     if (decidable) {
-      const interview = interviewRow(row.row, status, opts.interview, opts.outcome);
+      const showOutcomes = outcomesShown(
+        status,
+        opts.interview,
+        opts.outcome,
+        opts.outcomesRevealed,
+      );
+
+      const interview = interviewRow(
+        row.row,
+        status,
+        opts.interview,
+        opts.outcome,
+        showOutcomes,
+      );
       if (interview.length > 0) rows.push(interview);
 
-      const outcome = outcomeRow(row.row, status, opts.interview, opts.outcome);
-      if (outcome.length > 0) rows.push(outcome);
+      if (showOutcomes) {
+        const outcome = outcomeRow(row.row, status, opts.interview, opts.outcome);
+        if (outcome.length > 0) rows.push(outcome);
+      }
     }
   }
 
@@ -567,12 +749,9 @@ export function buildDancerCard(row: ApplicationRow, opts: CardOptions): Message
       custom_id: customId("reopen", row.row),
     });
   }
-  utility.push({
-    type: ComponentType.BUTTON,
-    style: ButtonStyle.SECONDARY,
-    label: "Open row",
-    custom_id: customId("open", row.row),
-  });
+  // [Sheet row] over an in-Discord row dump: it shows the whole answer without
+  // truncation, it's a link so it can't fail or time out, and the sheet is the
+  // source of truth anyway.
   if (opts.sheetUrl) {
     utility.push({
       type: ComponentType.BUTTON,
@@ -581,7 +760,7 @@ export function buildDancerCard(row: ApplicationRow, opts: CardOptions): Message
       url: opts.sheetUrl,
     });
   }
-  rows.push(utility);
+  if (utility.length > 0) rows.push(utility);
 
   const interviewStatus = opts.interview ? ` · interview-${opts.interview.state}` : "";
   const outcomeStatus = opts.outcome ? ` · ${opts.outcome.outcome}` : "";
@@ -632,41 +811,3 @@ export function buildIntakeMessage(
   });
 }
 
-/** Ephemeral full-row dump behind [Open row]. */
-export function buildOpenRowResponse(
-  row: number,
-  headers: readonly string[],
-  values: readonly string[],
-  sheetUrl?: string,
-): MessagePayload {
-  const lines: string[] = [];
-  let omitted = 0;
-
-  for (let i = 0; i < headers.length; i++) {
-    const header = (headers[i] ?? "").toString().trim();
-    const value = (values[i] ?? "").toString().trim();
-    if (!value) continue;
-    const line = `**${escapeMd(truncate(header || `col ${i + 1}`, 120))}**\n${escapeMd(truncate(value, 500))}`;
-    if (lines.join("\n\n").length + line.length > EMBED_DESC_LIMIT - 200) {
-      omitted++;
-      continue;
-    }
-    lines.push(line);
-  }
-
-  const tail: string[] = [];
-  if (omitted > 0) tail.push(`_${omitted} field(s) too long to show._`);
-  if (sheetUrl) tail.push(`[Open in the sheet](${sheetUrl})`);
-
-  return {
-    embeds: [
-      {
-        title: `Row ${row}`,
-        description: truncate(
-          [...lines, ...tail].join("\n\n") || "_Row is empty._",
-          EMBED_DESC_LIMIT,
-        ),
-      },
-    ],
-  };
-}

@@ -5,6 +5,7 @@
  * terminal step is rank 27 (email), which is not built.
  */
 import { getDirectorIds } from "../config/directors";
+import { isEnabled } from "../config/flags";
 import { getNumber } from "../config/settings";
 import { modalValue } from "../discord/respond";
 import { postMessage } from "../discord/rest";
@@ -61,10 +62,16 @@ async function announce(
 ): Promise<void> {
   if (directorIds.length === 0) return;
 
-  const link = `https://discord.com/channels/${env.GUILD_COMMUNITY_ID}/${record.channelId}/${record.messageId}`;
-  await postMessage(env, record.channelId, {
-    content: `${directorIds.map(mention).join(" ")} — ${body}\n${link}`,
-    allowed_mentions: { parse: [], users: [...directorIds] },
+  const quiet = await isEnabled(env, "quiet_pings");
+
+  // Into the applicant's thread where there is one - see announceOnCard.
+  const target = record.threadId ?? record.channelId;
+  const link = record.threadId
+    ? ""
+    : `\nhttps://discord.com/channels/${env.GUILD_COMMUNITY_ID}/${record.channelId}/${record.messageId}`;
+  await postMessage(env, target, {
+    content: quiet ? `${body}${link}` : `${directorIds.map(mention).join(" ")} — ${body}${link}`,
+    allowed_mentions: { parse: [], users: quiet ? [] : [...directorIds] },
   });
 }
 
@@ -114,7 +121,31 @@ export async function applyBallot(
   if (body) await announce(env, loaded.record, directorIds, body);
 }
 
-/** [Move onto Interview] — settles the split and unlocks the interview. */
+/**
+ * The placement select shown on a split. Settles the discussion *and* records
+ * what it settled on, which unlocks the interview and seeds the outcome step.
+ */
+export async function recordFinalPlacement(
+  env: Env,
+  row: number,
+  userId: string,
+  subunits: string[],
+): Promise<void> {
+  const loaded = await loadDecidable(env, row);
+  if (!loaded || subunits.length === 0) return;
+
+  await commit(env, loaded.record, {
+    ...loaded.decision,
+    final: { outcome: "yes", by: userId, at: new Date().toISOString(), subunits },
+  });
+}
+
+/**
+ * Legacy [Move onto Interview]. Nothing renders this button any more — a split
+ * asks for the placement instead — but cards posted before that change still
+ * carry it, and a button that silently does nothing is worse than one that
+ * records what it always did.
+ */
 export async function recordFinal(
   env: Env,
   row: number,

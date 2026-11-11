@@ -167,15 +167,20 @@ export interface InterviewEvent {
   startsAt: string;
   endsAt: string;
   timeZone: string;
+  guests?: string[];
 }
 
 export function createInterviewEvent(
   env: Env,
   params: {
+    /** Absolute instant, resolved against config:timezone by the caller. */
+    startsAt: string;
     date: string;
     time: string;
     durationMinutes: number;
     guestEmail: string;
+    /** Directors and the RISK account, alongside the applicant. */
+    guests: string[];
     title: string;
     description: string;
   },

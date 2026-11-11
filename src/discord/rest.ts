@@ -114,6 +114,39 @@ export async function editMessage(
 }
 
 /**
+ * Opens a thread on a message, so everything said about one applicant stays
+ * attached to their card instead of scattering through the channel.
+ *
+ * Seven days is Discord's maximum auto-archive, and posting in a thread
+ * unarchives it - so an active discussion never disappears mid-conversation.
+ *
+ * Needs CREATE_PUBLIC_THREADS, and SEND_MESSAGES_IN_THREADS to say anything in
+ * one afterwards.
+ */
+export async function createThreadOnMessage(
+  env: Env,
+  channelId: string,
+  messageId: string,
+  name: string,
+): Promise<string> {
+  const res = await discordFetch(
+    env,
+    `/channels/${channelId}/messages/${messageId}/threads`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        name: name.slice(0, 100),
+        auto_archive_duration: 10080,
+      }),
+    },
+  );
+  if (!res.ok) throw new DiscordError(res.status, await res.text());
+
+  const thread = (await res.json()) as { id: string };
+  return thread.id;
+}
+
+/**
  * Creates a fresh invite for one named person.
  *
  * Single-use and time-limited on purpose. The acceptance email says "7 days or
@@ -180,5 +213,171 @@ export async function editOriginalResponse(
       body: JSON.stringify(payload),
     },
   );
+  if (!res.ok) throw new DiscordError(res.status, await res.text());
+}
+
+/**
+ * A new ephemeral message on an interaction that has already been answered.
+ *
+ * Not editOriginalResponse: after a DEFERRED_UPDATE_MESSAGE, `@original` is the
+ * message the component lives on — the card — so patching it would overwrite
+ * the card with the note.
+ */
+export async function followUp(
+  env: Env,
+  applicationId: string,
+  token: string,
+  payload: MessagePayload,
+): Promise<void> {
+  const res = await fetch(`${API}/webhooks/${applicationId}/${token}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new DiscordError(res.status, await res.text());
+}
+
+/**
+ * DMs a member, best-effort.
+ *
+ * Returns false rather than throwing when the DM can't be delivered — members
+ * routinely have DMs from server members turned off, and that is not a failure
+ * of the thing that wanted to tell them something. Callers fall back to saying
+ * it somewhere the person can actually see.
+ */
+export async function sendDirectMessage(
+  env: Env,
+  userId: string,
+  payload: MessagePayload,
+): Promise<boolean> {
+  try {
+    const res = await discordFetch(env, "/users/@me/channels", {
+      method: "POST",
+      body: JSON.stringify({ recipient_id: userId }),
+    });
+    const channel = (await res.json()) as { id?: string };
+    if (!channel.id) return false;
+    await postMessage(env, channel.id, payload);
+    return true;
+  } catch (err) {
+    console.error("DM failed", userId, err);
+    return false;
+  }
+}
+
+/**
+ * Adds a role to a guild member. The bot's own role must sit above the role it
+ * is granting, which is a server setting, not something a token can fix — so a
+ * 403 here means the role hierarchy, not the permission bit.
+ */
+export async function addRole(
+  env: Env,
+  guildId: string,
+  userId: string,
+  roleId: string,
+): Promise<void> {
+  await discordFetch(env, `/guilds/${guildId}/members/${userId}/roles/${roleId}`, {
+    method: "PUT",
+  });
+}
+
+/** The counterpart to addRole, and subject to the same role-hierarchy rule. */
+export async function removeRole(
+  env: Env,
+  guildId: string,
+  userId: string,
+  roleId: string,
+): Promise<void> {
+  await discordFetch(env, `/guilds/${guildId}/members/${userId}/roles/${roleId}`, {
+    method: "DELETE",
+  });
+}
+
+/**
+ * Archives a thread — Discord's "closed". Not destructive: the thread stays
+ * readable, drops out of the active list, and posting to it reopens it.
+ */
+export async function archiveThread(env: Env, threadId: string): Promise<void> {
+  await discordFetch(env, `/channels/${threadId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ archived: true }),
+  });
+}
+
+/** A member's current role ids, or null when they can't be read. */
+export async function memberRoles(
+  env: Env,
+  guildId: string,
+  userId: string,
+): Promise<string[] | null> {
+  try {
+    const res = await discordFetch(env, `/guilds/${guildId}/members/${userId}`);
+    if (!res.ok) return null;
+    const member = (await res.json()) as { roles?: string[] };
+    return member.roles ?? [];
+  } catch {
+    return null;
+  }
+}
+
+export interface FetchedPoll {
+  question?: { text?: string };
+  answers?: { answer_id: number; poll_media?: { text?: string } }[];
+  expiry?: string;
+  results?: {
+    is_finalized?: boolean;
+    answer_counts?: { id: number; count: number }[];
+  };
+}
+
+/** One message, for reading a poll's results off it. */
+export async function getMessage(
+  env: Env,
+  channelId: string,
+  messageId: string,
+): Promise<{ id: string; poll?: FetchedPoll }> {
+  const res = await discordFetch(env, `/channels/${channelId}/messages/${messageId}`);
+  if (!res.ok) throw new DiscordError(res.status, await res.text());
+  return (await res.json()) as { id: string; poll?: FetchedPoll };
+}
+
+/**
+ * Who voted for one answer.
+ *
+ * A native poll's counts are just numbers; a session needs the list of people,
+ * both to pre-fill attendance and because §8 wants the signal filtered to
+ * trainees rather than everyone who saw the message.
+ */
+export async function pollAnswerVoters(
+  env: Env,
+  channelId: string,
+  messageId: string,
+  answerId: number,
+): Promise<{ id: string; username?: string; global_name?: string }[]> {
+  const res = await discordFetch(
+    env,
+    `/channels/${channelId}/polls/${messageId}/answers/${answerId}?limit=100`,
+  );
+  if (!res.ok) throw new DiscordError(res.status, await res.text());
+  const body = (await res.json()) as {
+    users?: { id: string; username?: string; global_name?: string }[];
+  };
+  return body.users ?? [];
+}
+
+/**
+ * Ends a poll early.
+ *
+ * Discord finalises results on expiry; without this an "I've seen enough"
+ * would have to wait out the full week to read them.
+ */
+export async function expirePoll(
+  env: Env,
+  channelId: string,
+  messageId: string,
+): Promise<void> {
+  const res = await discordFetch(env, `/channels/${channelId}/polls/${messageId}/expire`, {
+    method: "POST",
+  });
   if (!res.ok) throw new DiscordError(res.status, await res.text());
 }

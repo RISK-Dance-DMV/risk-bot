@@ -5,7 +5,7 @@ import { audit } from "../audit";
 import { getNumber } from "../config/settings";
 import { deliverEmail } from "../email/service";
 import { dispatchPublished } from "./hooks";
-import { editMessage, postToChannelByName } from "../discord/rest";
+import { editMessage, postMessage, postToChannelByName } from "../discord/rest";
 import type { Env } from "../env";
 import {
   describeTarget,
@@ -51,6 +51,14 @@ export interface CreateDraftInput {
   content: string;
   target: DraftTarget;
   confirmation: ChannelRef;
+  /**
+   * Post the draft here instead - a thread id, so an applicant's paperwork
+   * stays with the applicant. `confirmation` is still required, and is what
+   * this falls back to: a thread can be archived, deleted, or beyond the
+   * bot's permissions, and a draft that failed to post would mean the feature
+   * above it fails silently.
+   */
+  confirmationChannelId?: string;
   referencesAt?: string;
   meta?: Record<string, string>;
 }
@@ -74,12 +82,27 @@ export async function createDraft(
     ...(input.meta ? { meta: input.meta } : {}),
   };
 
-  const posted = await postToChannelByName(
-    env,
-    guildIdFor(env, draft.confirmation.guild),
-    draft.confirmation.channel,
-    renderDraft(draft),
-  );
+  const payload = renderDraft(draft);
+  const toNamedChannel = () =>
+    postToChannelByName(
+      env,
+      guildIdFor(env, draft.confirmation.guild),
+      draft.confirmation.channel,
+      payload,
+    );
+
+  let posted: { id: string; channelId: string };
+  if (input.confirmationChannelId) {
+    const threadId = input.confirmationChannelId;
+    try {
+      posted = { ...(await postMessage(env, threadId, payload)), channelId: threadId };
+    } catch (err) {
+      console.error("draft thread post failed, falling back to channel", threadId, err);
+      posted = await toNamedChannel();
+    }
+  } else {
+    posted = await toNamedChannel();
+  }
 
   const stored: Draft = {
     ...draft,
@@ -204,11 +227,24 @@ export async function approveDraft(
 ): Promise<ActionResult> {
   const claimed = await claim(env, id);
   if (!claimed.ok) return claimed;
-  return publish(env, claimed.draft, actor, claimed.draft.content, "verbatim");
+  return publish(
+    env,
+    claimed.draft,
+    actor,
+    claimed.draft.content,
+    claimed.draft.editedAt ? "edited" : "verbatim",
+  );
 }
 
-/** [Edit] — publish the edited text. */
-export async function editAndPublishDraft(
+/**
+ * [Edit] — save the new text and leave the draft pending.
+ *
+ * Editing used to publish on submit, which made Discord's unrenameable
+ * "Submit" button a send button. Two clicks that both send is one click too
+ * many for the only irreversible action in the system, so this saves and the
+ * director approves separately.
+ */
+export async function saveDraftEdit(
   env: Env,
   id: string,
   actor: string,
@@ -217,9 +253,33 @@ export async function editAndPublishDraft(
   const invalid = validateContent(content);
   if (invalid) return { ok: false, reason: invalid };
 
-  const claimed = await claim(env, id);
-  if (!claimed.ok) return claimed;
-  return publish(env, claimed.draft, actor, content.trim(), "edited");
+  const draft = await getDraft(env, id);
+  if (!draft) return { ok: false, reason: "That draft is no longer on file." };
+  if (draft.state !== "pending") {
+    const who = draft.actedBy ? ` by <@${draft.actedBy}>` : "";
+    const what = draft.state === "skipped" ? "skipped" : "published";
+    return { ok: false, reason: `Already ${what}${who} — there's nothing left to edit.` };
+  }
+
+  const edited: Draft = {
+    ...draft,
+    content: content.trim(),
+    editedBy: actor,
+    editedAt: new Date().toISOString(),
+  };
+  await putDraft(env, edited);
+
+  // Repaint in place so the buttons survive - the draft is still pending.
+  if (edited.channelId && edited.messageId) {
+    await editMessage(env, edited.channelId, edited.messageId, renderDraft(edited));
+  }
+  await audit(env, {
+    action: "draft.edited",
+    actor,
+    target: edited.id,
+    detail: `${edited.kind} → ${describeTarget(edited.target)}`,
+  });
+  return { ok: true, draft: edited };
 }
 
 /** [Discard] — log, publish nothing. */

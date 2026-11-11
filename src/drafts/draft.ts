@@ -9,7 +9,7 @@
  * property the rest of the design rests on, so it has no feature flag - a draft
  * that can't be created would mean the feature above it fails silently.
  */
-import { ButtonStyle, ComponentType, type MessagePayload } from "../discord/types";
+import { ButtonStyle, ComponentType, MessageFlags, type MessagePayload } from "../discord/types";
 import { escapeMd, mention, truncate } from "../applications/text";
 
 /** Discord caps message content here, so a draft can never exceed it. */
@@ -36,6 +36,25 @@ export function describeTarget(target: DraftTarget): string {
   return target.kind === "channel" ? `#${target.channel}` : target.to;
 }
 
+/**
+ * Where a human will find this draft, for the reply that tells them to go
+ * action it.
+ *
+ * A link, not a description. "In this thread" is only true if you are already
+ * in the thread, and the button that produces this reply is usually clicked
+ * from the channel — where the thread is a collapsed line under the card, or
+ * nothing at all. `<#id>` renders as a clickable thread wherever it is read.
+ *
+ * Reads the draft's actual home rather than its intended one: a thread post
+ * that failed falls back to the named channel, and the reply must not point at
+ * a thread the draft isn't in.
+ */
+export function describeConfirmation(draft: Draft, threadId?: string): string {
+  return threadId && draft.channelId === threadId
+    ? `in <#${threadId}>`
+    : `in #${draft.confirmation.channel}`;
+}
+
 export type DraftState = "pending" | "publishing" | "published" | "skipped";
 
 export interface Draft {
@@ -57,6 +76,9 @@ export interface Draft {
    */
   referencesAt?: string;
   repingedAt?: string;
+  /** Set by [Edit]. Editing saves; approving is still a separate click. */
+  editedBy?: string;
+  editedAt?: string;
   actedBy?: string;
   actedAt?: string;
   publishedAs?: "verbatim" | "edited";
@@ -115,10 +137,14 @@ export function renderDraft(draft: Draft): MessagePayload {
     header.push(`Subject: ${escapeMd(draft.target.subject)}`);
   }
   if (draft.referencesAt) header.push(`References ${discordDate(draft.referencesAt)}`);
+  if (draft.editedBy) header.push(`✏️ Edited by ${mention(draft.editedBy)} — still not sent.`);
 
   return {
     content: truncate([...header, "", quote(draft.content)].join("\n"), 4000),
     allowed_mentions: { parse: [] },
+    // A draft full of Discord invites would otherwise unfurl into a stack of
+    // server cards taller than the draft itself.
+    flags: MessageFlags.SUPPRESS_EMBEDS,
     components: [
       {
         type: ComponentType.ACTION_ROW,
@@ -173,6 +199,7 @@ export function renderResolvedDraft(draft: Draft, targetGuildId?: string): Messa
   return {
     content: truncate(lines.join("\n"), 4000),
     allowed_mentions: { parse: [] },
+    flags: MessageFlags.SUPPRESS_EMBEDS,
     components: [],
   };
 }

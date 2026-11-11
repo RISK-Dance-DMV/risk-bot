@@ -97,6 +97,28 @@ export type RenderResult =
   | { ok: false; reason: string };
 
 /**
+ * Whitespace a template picks up from being written in a spreadsheet cell.
+ *
+ * Gmail renders these as plain text, and it collapses any long run of blank
+ * lines behind a "•••" toggle — so a template spaced out for legibility in the
+ * sheet arrives with a hole punched in the middle of it. Runs of three or more
+ * newlines become a single blank line; trailing spaces go too, since they
+ * survive into the rendered mail as ragged indentation.
+ */
+export function tidyBody(body: string): string {
+  return body
+    .replace(/\r\n?/g, "\n")
+    // Invisible characters first, or the blank-line collapse below never fires:
+    // a "blank" line holding a non-breaking space is not two adjacent newlines.
+    // Text written in Google Docs and pasted into the sheet is full of these.
+    .replace(/[\u200b-\u200d\u2060\ufeff]/g, "")
+    .replace(/[\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000]/g, " ")
+    .replace(/[ \t]+$/gm, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+/**
  * Substitutes merge fields, and refuses if any are left over.
  *
  * A template that renders to "Hi {{name}}" would go out looking exactly like
@@ -107,8 +129,13 @@ export function renderTemplate(
   merge: Record<string, string>,
 ): RenderResult {
   const byLooseName = new Map<string, string>();
+  // Blank values deliberately don't fill a field - a template asking for
+  // {{feedback}} and getting nothing should refuse, not send a sentence that
+  // trails off. But the refusal has to say which of the two happened.
+  const leftBlank = new Set<string>();
   for (const [field, value] of Object.entries(merge)) {
-    if (value !== "") byLooseName.set(loosely(field), value);
+    if (value === "") leftBlank.add(loosely(field));
+    else byLooseName.set(loosely(field), value);
   }
 
   const substitute = (text: string): string =>
@@ -117,14 +144,18 @@ export function renderTemplate(
     });
 
   const subject = substitute(template.subject);
-  const body = substitute(template.body);
+  const body = tidyBody(substitute(template.body));
 
   const unresolved = [...new Set([...mergeFieldsIn(subject), ...mergeFieldsIn(body)])];
   if (unresolved.length > 0) {
     return {
       ok: false,
       reason: `Template "${template.key}" has unfilled merge field(s): ${unresolved
-        .map((f) => `{{${f}}}`)
+        .map((f) =>
+          leftBlank.has(loosely(f))
+            ? `{{${f}}} — you left that box empty, and this template needs it`
+            : `{{${f}}} — nothing here fills that; check the spelling in the sheet`,
+        )
         .join(", ")}`,
     };
   }

@@ -4,7 +4,8 @@
  * card, so they can't live together.
  */
 
-export const DEFAULT_MINUTES = 30;
+/** What RISK actually books. Prefills the modal; a director can override it. */
+export const DEFAULT_MINUTES = 60;
 
 /**
  * `drafted` is not one of the doc's statuses. It is the gap between writing an
@@ -109,4 +110,57 @@ export function renderInterviewLine(interview: InterviewRecord): string {
       return `📅 **Interview scheduled** for ${slot}${moved} — calendar invite sent.`;
     }
   }
+}
+
+/**
+ * How far the named zone was from UTC at a given instant, in ms.
+ *
+ * Reads the wall clock the zone showed at that instant and subtracts. Workers
+ * ship full ICU, so Intl knows the zone's real DST history rather than a fixed
+ * offset.
+ */
+function zoneOffsetMs(instant: number, timeZone: string): number {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    hourCycle: "h23",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).formatToParts(new Date(instant));
+
+  const at = (type: string) => Number(parts.find((p) => p.type === type)?.value);
+  const asIfUtc = Date.UTC(
+    at("year"),
+    at("month") - 1,
+    at("day"),
+    at("hour"),
+    at("minute"),
+    at("second"),
+  );
+  return asIfUtc - instant;
+}
+
+/**
+ * The instant a typed slot refers to.
+ *
+ * A director types "2:30pm" meaning 2:30pm here, not 2:30pm UTC. Appending a
+ * `Z` and calling it done shifts the moment by the offset — four hours in
+ * summer — which is invisible in formatSlot's label and very visible in a
+ * Discord timestamp, since Discord renders in each viewer's own zone.
+ *
+ * Two passes because the offset at the guessed instant can differ from the
+ * offset at the true one: on a DST changeover the first guess lands on the
+ * wrong side of the boundary and would be an hour out.
+ */
+export function slotInstant(date: string, time: string, timeZone: string): Date {
+  const [y, m, d] = date.split("-").map(Number) as [number, number, number];
+  const [hh, mm] = time.split(":").map(Number) as [number, number];
+
+  const wallClock = Date.UTC(y, m - 1, d, hh, mm, 0);
+  let instant = wallClock - zoneOffsetMs(wallClock, timeZone);
+  instant = wallClock - zoneOffsetMs(instant, timeZone);
+  return new Date(instant);
 }

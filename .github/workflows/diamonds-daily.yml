@@ -1,0 +1,42 @@
+# Diamonds audition reminders (DIAMONDS.md): the DM the day before someone's
+# own window shuts, and the nudge as the last possible start date comes up.
+#
+# The second is the one that matters. The closing reminder keys off a window
+# being open, so it can't reach the person who never opened one — and that
+# person is the likeliest to lose a round to nothing but a calendar.
+#
+# Its own workflow rather than a line in trainee-daily, because the Diamonds
+# audition isn't the trainee program and a failure in either shouldn't be
+# reported as the other having gone wrong. Does nothing while the `diamonds`
+# flag is off.
+name: diamonds-daily
+
+on:
+  schedule:
+    - cron: "40 13 * * *"
+  workflow_dispatch:
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Diamonds reminders
+        env:
+          WORKER_URL: ${{ secrets.WORKER_URL }}
+          INBOUND_SECRET: ${{ secrets.INBOUND_SECRET }}
+        run: |
+          # GitHub starts this shell as `bash -e`, so a failing curl would exit
+          # before the echo. Clearing -e is what makes the error message reachable.
+          set +e -uo pipefail
+
+          # --fail-with-body so a failure prints the Worker's explanation rather
+          # than a bare exit code.
+          body=$(curl -sS --fail-with-body -X POST \
+            -H "X-RISK-Secret: ${INBOUND_SECRET}" \
+            -H "Content-Type: application/json" \
+            -d '{}' \
+            "${WORKER_URL%/}/jobs/diamonds-daily")
+          status=$?
+
+          echo "$body"
+          exit $status

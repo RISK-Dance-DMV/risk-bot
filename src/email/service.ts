@@ -7,6 +7,7 @@
  */
 import { readTemplates, sendEmail, type SendEmailResult } from "../appsScript";
 import { isEnabled } from "../config/flags";
+import { tidyBody } from "./templates";
 import { alertDirectors } from "../discord/rest";
 import type { Env } from "../env";
 import {
@@ -72,7 +73,9 @@ export async function deliverEmail(
 
   let result: SendEmailResult;
   try {
-    result = await sendEmail(env, message);
+    // Again here, not only in renderTemplate: a hand-edited draft reaches this
+    // point without ever having been through the renderer.
+    result = await sendEmail(env, { ...message, body: tidyBody(message.body) });
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
     // Failures post to #directors-bot-confirmation (design doc s27).

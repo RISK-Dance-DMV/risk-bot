@@ -13,6 +13,7 @@ import { alertDirectors } from "../discord/rest";
 import type { Env } from "../env";
 import { cell, parseRow } from "./fields";
 import { announceOnCard, getRecord, headersOk, setCardState } from "./intake";
+import { collectAuditionVideos } from "./videos";
 
 const SEEN_TTL = 400 * 24 * 60 * 60;
 const MAX_ROWS = 500;
@@ -86,18 +87,29 @@ async function processRow(
   const sheetRow = applications.rows.find((r) => r.row === applicationRow);
   if (!sheetRow) return result("no_card");
 
+  // Attached before the card is drawn, so the audition shows up in the same
+  // edit that flips the state rather than a redraw later.
+  const auditionVideos = await collectAuditionVideos(auditionRow.values);
   const wasClosed = record.state === "closed";
-  const updated = await setCardState(env, record, "submitted", sheetRow);
+  const updated = await setCardState(
+    env,
+    auditionVideos.length > 0 ? { ...record, auditionVideos } : record,
+    "submitted",
+    sheetRow,
+  );
 
   // The card flipping to `submitted` is the moment there's something to vote on,
   // and an edit notifies nobody.
   const name = parseRow(applicationRow, sheetRow.values).name || `row ${applicationRow}`;
+  // The link in the announcement, not only on the card: this message is what
+  // pulls a director in, and the video is the thing they came to watch.
+  const link = auditionVideos[0]?.links[0]?.url;
   await announceOnCard(
     env,
     updated,
-    wasClosed
+    (wasClosed
       ? `**${name}**'s audition arrived after their card had closed — reopened, and ready to vote on.`
-      : `**${name}**'s audition arrived. Ready to vote on.`,
+      : `**${name}**'s audition arrived. Ready to vote on.`) + (link ? `\n${link}` : ""),
   );
 
   return result(wasClosed ? "matched_late" : "matched");

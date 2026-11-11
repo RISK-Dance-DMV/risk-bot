@@ -42,6 +42,13 @@ export interface FinalDecision {
   outcome: "yes" | "no";
   by: string;
   at: string;
+  /**
+   * What the discussion landed on. Recorded rather than derived, because after
+   * a split there is nothing to derive it from — the ballots disagree, and
+   * that disagreement is the record of what people thought, not what was
+   * decided. Absent on older records settled before this was asked for.
+   */
+  subunits?: string[];
 }
 
 export interface Decision {
@@ -98,7 +105,7 @@ export function tally(decision: Decision): Tally {
 }
 
 /** The ballots actually cast, holds excluded. */
-function castBallots(decision: Decision): string[][] {
+export function castBallots(decision: Decision): string[][] {
   return Object.values(decision.ballots).filter(
     (b): b is string[] => !isHold(b),
   );
@@ -122,6 +129,45 @@ export function agreedPlacement(
     if (ballot === undefined || isHold(ballot)) return null;
     ballots.push(ballot);
   }
+
+  const first = ballots[0];
+  if (!first) return null;
+  return ballots.every((b) => sameSet(b, first)) ? [...first].sort() : null;
+}
+
+/**
+ * The placement that stands, however it was reached.
+ *
+ * A settled discussion outranks the ballots: after a split the ballots are a
+ * record of the disagreement, and `agreedPlacement` correctly refuses to read
+ * agreement into them. What the directors then decided lives on `final`.
+ */
+export function settledPlacement(
+  decision: Decision,
+  directorIds: readonly string[],
+): string[] | null {
+  if (decision.final) {
+    if (decision.final.outcome === "no") return [];
+    return decision.final.subunits ?? agreedPlacement(decision, directorIds);
+  }
+  return agreedPlacement(decision, directorIds);
+}
+
+/**
+ * The placement the people who actually voted agreed on, once enough of them
+ * have — without requiring the whole roster.
+ *
+ * agreedPlacement insists on every director because an applicant's placement is
+ * everyone's call. A trainee's isn't: a director who coaches them shouldn't be
+ * voting on their audition, and waiting for a vote that will never come would
+ * stall every trainee that director works with.
+ */
+export function agreedAmongVoters(
+  decision: Decision,
+  minVotes: number,
+): string[] | null {
+  const ballots = castBallots(decision);
+  if (ballots.length < Math.max(1, minVotes)) return null;
 
   const first = ballots[0];
   if (!first) return null;
@@ -171,6 +217,8 @@ export interface FeedbackProgress {
   submitted: number;
   total: number;
   complete: boolean;
+  /** Which directors have written, in roster order. Names only, never text. */
+  written: string[];
 }
 
 /**
@@ -181,11 +229,12 @@ export function feedbackProgress(
   decision: Decision,
   directorIds: readonly string[],
 ): FeedbackProgress {
-  const submitted = directorIds.filter((id) => decision.feedback[id]?.text).length;
+  const written = directorIds.filter((id) => decision.feedback[id]?.text);
   return {
-    submitted,
+    submitted: written.length,
     total: directorIds.length,
-    complete: directorIds.length > 0 && submitted === directorIds.length,
+    complete: directorIds.length > 0 && written.length === directorIds.length,
+    written,
   };
 }
 
@@ -238,9 +287,12 @@ export function renderDecision(
 
   const lines: string[] = [];
   if (decision.final) {
+    const placed = decision.final.subunits ?? [];
     const verdict =
       decision.final.outcome === "yes"
-        ? "✅ **Moving onto interview**"
+        ? placed.length > 0
+          ? `✅ **Moving onto interview — ${placed.join(", ")}**`
+          : "✅ **Moving onto interview**"
         : "🚫 **Rejected from RISK**";
     lines.push(`${verdict} — decided by ${mention(decision.final.by)} after discussion`);
   } else {
@@ -275,8 +327,14 @@ export function renderDecision(
   } else if (progress.complete) {
     lines.push(`Feedback: all ${progress.total} in — shown below.`);
   } else {
+    // Who, not what. The text stays sealed, but a director who can't see their
+    // own name here has a note they think they left and didn't - and one who
+    // can knows the composed draft will already contain their words.
+    const who = progress.written.length > 0
+      ? ` (${progress.written.map(mention).join(", ")})`
+      : "";
     lines.push(
-      `Feedback: ${progress.submitted} of ${progress.total} in — hidden until everyone has written.`,
+      `Feedback: ${progress.submitted} of ${progress.total} in${who} — text hidden until everyone has written.`,
     );
   }
 

@@ -4,6 +4,7 @@
 import {
   AUDITION_METHOD_COLUMN,
   AUDITION_METHOD_MATCH,
+  NAME_COLUMNS,
   PINNED,
   PINNED_HEADER_MATCH,
   type AuditionMethod,
@@ -91,13 +92,22 @@ export function wantsFeedback(answer: string): boolean {
   return /\byes\b/i.test(answer.trim());
 }
 
+/** First branch that actually answered. See NAME_COLUMNS. */
+function nameFrom(values: readonly string[]): string {
+  for (const column of NAME_COLUMNS) {
+    const found = cell(values, column);
+    if (found) return found;
+  }
+  return "";
+}
+
 export function parseRow(row: number, values: readonly string[]): ApplicationRow {
   const auditionMethodRaw = cell(values, AUDITION_METHOD_COLUMN);
   return {
     row,
     email: cell(values, PINNED.email),
     applicantType: cell(values, PINNED.applicantType),
-    name: cell(values, PINNED.name),
+    name: nameFrom(values),
     auditionMethodRaw,
     auditionMethod: classifyAuditionMethod(auditionMethodRaw),
     values,

@@ -155,7 +155,11 @@ export async function checkAll(links: VideoLink[]): Promise<CheckedVideoLink[]> 
 
 // ------------------------------------------------------- per-column grouping
 
-import { VIDEO_COLUMNS } from "../config/columns";
+import {
+  AUDITION_VIDEO_COLUMN,
+  AUDITION_VIDEO_LABEL,
+  VIDEO_COLUMNS,
+} from "../config/columns";
 import { cell } from "./fields";
 
 export interface VideoGroup {
@@ -165,27 +169,54 @@ export interface VideoGroup {
 
 /**
  * Reads every configured video column, keeping each column's category as the
- * group label. De-duplicates across columns: the same link pasted into both
- * CREW and SOLO is one link, listed under the first column it appeared in.
+ * group label.
+ *
+ * A link submitted for two categories appears under both. The columns *are* the
+ * categories, so collapsing a repeat would hide that the applicant offered the
+ * same piece for CREW and SOLO - which is something a reviewer wants to see.
+ *
+ * The sharing check is still done once per unique URL, because that costs a
+ * network request and a Worker has a fixed budget of them.
  */
 export async function collectVideoGroups(
   values: readonly string[],
 ): Promise<VideoGroup[]> {
-  const seen = new Set<string>();
+  const checked = new Map<string, LinkAccess>();
   const groups: VideoGroup[] = [];
 
   for (const col of VIDEO_COLUMNS) {
-    const fresh = extractVideoLinks(cell(values, col.column)).filter((link) => {
-      if (seen.has(link.url)) return false;
-      seen.add(link.url);
-      return true;
-    });
-    if (fresh.length === 0) continue;
-    groups.push({ label: col.label, links: await checkAll(fresh) });
+    const links = extractVideoLinks(cell(values, col.column));
+    if (links.length === 0) continue;
+
+    const withAccess: CheckedVideoLink[] = [];
+    for (const link of links) {
+      let access = checked.get(link.url);
+      if (access === undefined) {
+        access = await checkLinkAccess(link.url);
+        checked.set(link.url, access);
+      }
+      withAccess.push({ ...link, access });
+    }
+    groups.push({ label: col.label, links: withAccess });
   }
   return groups;
 }
 
 export function countLinks(groups: VideoGroup[]): number {
   return groups.reduce((n, g) => n + g.links.length, 0);
+}
+
+/**
+ * The audition form's own video, read from a row of the *audition* sheet.
+ *
+ * One group rather than merged into the application's, because where a video
+ * came from is the thing a reviewer is judging: an audition done through the
+ * RISK process is not the same evidence as links pasted into an application.
+ */
+export async function collectAuditionVideos(
+  values: readonly string[],
+): Promise<VideoGroup[]> {
+  const links = extractVideoLinks(cell(values, AUDITION_VIDEO_COLUMN));
+  if (links.length === 0) return [];
+  return [{ label: AUDITION_VIDEO_LABEL, links: await checkAll(links) }];
 }

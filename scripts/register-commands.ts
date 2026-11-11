@@ -11,6 +11,7 @@
 import { readFileSync } from "node:fs";
 import {
   COMMUNITY_GUILD_COMMANDS,
+  DANCE_GUILD_COMMANDS,
   INVITE_PERMISSIONS,
 } from "../src/commands/definitions";
 
@@ -60,7 +61,7 @@ function loadEnv(): LoadedEnv {
     // caller decides whether that's worth mentioning.
   }
 
-  for (const key of ["DISCORD_APPLICATION_ID", "GUILD_COMMUNITY_ID"]) {
+  for (const key of ["DISCORD_APPLICATION_ID", "GUILD_COMMUNITY_ID", "GUILD_DANCE_ID"]) {
     if (!values[key]) values[key] = fromWranglerToml(key);
   }
 
@@ -158,9 +159,25 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  for (const command of COMMUNITY_GUILD_COMMANDS) {
+  const danceGuildId = env.GUILD_DANCE_ID ?? "";
+  const targets: { guildId: string; label: string; commands: readonly unknown[] }[] = [
+    { guildId, label: "community", commands: COMMUNITY_GUILD_COMMANDS },
+  ];
+  // Skipped rather than failed when unset: the dance guild only matters once
+  // rank 12 is in play, and everything before it registers fine without it.
+  if (danceGuildId) {
+    targets.push({ guildId: danceGuildId, label: "dance", commands: DANCE_GUILD_COMMANDS });
+  } else {
+    console.log(
+      "GUILD_DANCE_ID isn't in wrangler.toml or the environment — skipping the\n" +
+        "dance guild, so /audition will not be registered.\n",
+    );
+  }
+
+  for (const target of targets) {
+  for (const command of target.commands as { name: string }[]) {
     const res = await fetch(
-      `https://discord.com/api/v10/applications/${appId}/guilds/${guildId}/commands`,
+      `https://discord.com/api/v10/applications/${appId}/guilds/${target.guildId}/commands`,
       {
         method: "POST",
         headers: {
@@ -174,11 +191,12 @@ async function main(): Promise<void> {
     if (!res.ok) {
       const body = await res.text();
       console.error(`/${command.name}: HTTP ${res.status} ${body}\n`);
-      await explainFailure(res.status, body, token, appId, guildId);
+      await explainFailure(res.status, body, token, appId, target.guildId);
       process.exit(1);
     }
     const body = (await res.json()) as { id: string };
-    console.log(`/${command.name} → ${body.id}`);
+    console.log(`/${command.name} → ${body.id} (${target.label})`);
+  }
   }
 
   console.log(

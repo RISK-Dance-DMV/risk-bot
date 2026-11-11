@@ -26,6 +26,19 @@ export const PINNED_HEADER_MATCH: Record<string, string> = {
   E: "name",
 };
 
+/**
+ * Every column that can hold the applicant's name, in the order to try them.
+ *
+ * The form branches on applicant type (column D) and asks for a name *after*
+ * the branch, so each branch has its own Name question and its own column:
+ * E for dancers, W for videographers and editors. Both headers read "Name",
+ * which is why the header check can't tell them apart and why this is a list
+ * of letters rather than a lookup.
+ *
+ * If a third branch appears, add its column here — nothing else needs to know.
+ */
+export const NAME_COLUMNS = ["E", "W"] as const;
+
 export interface CardColumn {
   key: string;
   label: string;
@@ -47,6 +60,11 @@ export const CARD_COLUMNS: CardColumn[] = [
 /**
  * Video columns. The column itself names the category, so the label comes from
  * here; any annotation inside the cell is kept as a per-link label on top.
+ *
+ * The form once asked for CREW and SOLO videos separately, in AM/AN and AO/AP.
+ * The SOLO questions are gone, so AN and AP are no longer read — but they are
+ * still there in the sheet holding the answers people gave before the change,
+ * which is why nothing below shifted up.
  */
 export interface VideoColumn {
   column: string;
@@ -54,11 +72,25 @@ export interface VideoColumn {
 }
 
 export const VIDEO_COLUMNS: VideoColumn[] = [
-  { column: "AM", label: "Boy Group — CREW" },
-  { column: "AN", label: "Boy Group — SOLO" },
-  { column: "AO", label: "Girl Group — CREW" },
-  { column: "AP", label: "Girl Group — SOLO" },
+  { column: "AM", label: "Boy Group" },
+  { column: "AO", label: "Girl Group" },
 ];
+
+/**
+ * The audition form's video column — column D on the *audition* response sheet,
+ * not the application one. Every other letter in this file addresses the
+ * application sheet, so this is the exception worth naming out loud.
+ */
+export const AUDITION_VIDEO_COLUMN = "D";
+
+export const AUDITION_VIDEO_LABEL = "RISK Audition";
+
+/**
+ * "Videography and/or editing submissions" — the videographer branch's answer
+ * to what a dancer's video columns ask. Their card is a one-liner, but a
+ * one-liner with no work on it is a card nobody can act on.
+ */
+export const VIDEOGRAPHER_WORK_COLUMN = "AJ";
 
 /** Applicant-type values that get the full card rather than a one-liner. */
 export const DANCER_TYPE_MATCH = "dancer";

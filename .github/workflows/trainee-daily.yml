@@ -1,0 +1,38 @@
+# Trainee audition deadlines (design doc rank 12): the DM reminder the day
+# before, and the auto-lapse audition_lapse_days after. Scheduled Actions run
+# 5-30 minutes late; nothing here assumes a minute.
+#
+# Separate from applications-daily because that job is about applicants and this
+# one is about trainees — a failure in either shouldn't be reported as the other
+# having gone wrong.
+name: trainee-daily
+
+on:
+  schedule:
+    - cron: "20 13 * * *"
+  workflow_dispatch:
+
+jobs:
+  deadlines:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Audition deadlines
+        env:
+          WORKER_URL: ${{ secrets.WORKER_URL }}
+          INBOUND_SECRET: ${{ secrets.INBOUND_SECRET }}
+        run: |
+          # GitHub starts this shell as `bash -e`, so a failing curl would exit
+          # before the echo. Clearing -e is what makes the error message reachable.
+          set +e -uo pipefail
+
+          # --fail-with-body so a failure prints the Worker's explanation rather
+          # than a bare exit code.
+          body=$(curl -sS --fail-with-body -X POST \
+            -H "X-RISK-Secret: ${INBOUND_SECRET}" \
+            -H "Content-Type: application/json" \
+            -d '{}' \
+            "${WORKER_URL%/}/jobs/trainee-daily")
+          status=$?
+
+          echo "$body"
+          exit $status

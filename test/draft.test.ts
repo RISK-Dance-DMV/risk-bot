@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   CONTENT_LIMIT,
+  describeConfirmation,
   describeTarget,
   draftCustomId,
   isDueForReping,
@@ -46,6 +47,36 @@ describe("draft custom ids", () => {
     expect(parseDraftCustomId("draft|publish|abcdef")).toBeNull();
     expect(parseDraftCustomId("draft|approve|BAD-ID")).toBeNull();
     expect(parseDraftCustomId("draft|approve")).toBeNull();
+  });
+});
+
+describe("describeConfirmation", () => {
+  /**
+   * A link rather than "in this thread": the button is usually clicked from the
+   * channel, where the thread is a collapsed line under the card at best.
+   */
+  it("links the thread when that's where the draft landed", () => {
+    const d = draft({ channelId: "999", messageId: "1" });
+    expect(describeConfirmation(d, "999")).toBe("in <#999>");
+  });
+
+  it("names the channel when there is no thread", () => {
+    const d = draft({ channelId: "555" });
+    expect(describeConfirmation(d)).toBe("in #coaches-bot-confirmation");
+  });
+
+  /**
+   * The case worth pinning: the thread post failed and createDraft fell back,
+   * so the card has a threadId but the draft isn't in it. Pointing a director
+   * at an empty thread is worse than not offering the shortcut.
+   */
+  it("names the channel when the thread post fell back", () => {
+    const d = draft({ channelId: "555" });
+    expect(describeConfirmation(d, "999")).toBe("in #coaches-bot-confirmation");
+  });
+
+  it("names the channel for a draft that hasn't been posted yet", () => {
+    expect(describeConfirmation(draft(), "999")).toBe("in #coaches-bot-confirmation");
   });
 });
 

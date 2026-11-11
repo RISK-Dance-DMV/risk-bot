@@ -14,7 +14,7 @@
 import { CARD_COLUMNS, PINNED } from "../config/columns";
 import { getDirectorIds } from "../config/directors";
 import { getNumber } from "../config/settings";
-import { formatSubunits, type Subunit } from "../config/subunits";
+import { formatSubunits, formatSubunitsLong, type Subunit } from "../config/subunits";
 import { createInvite, resolveChannelId } from "../discord/rest";
 import { modalValue } from "../discord/respond";
 import {
@@ -27,6 +27,7 @@ import {
 } from "../discord/types";
 import type { Draft } from "../drafts/draft";
 import { registerPublishHook } from "../drafts/hooks";
+import { describeConfirmation } from "../drafts/draft";
 import { createDraft } from "../drafts/service";
 import { loadTemplates } from "../email/service";
 import {
@@ -37,7 +38,7 @@ import {
 } from "../email/templates";
 import type { Env } from "../env";
 import {
-  agreedPlacement,
+  settledPlacement,
   decisionStatus,
   OUTCOME_LABEL,
   outcomeTemplateKey,
@@ -45,7 +46,13 @@ import {
   type OutcomeRecord,
 } from "./decision";
 import { cell, parseRow, wantsFeedback } from "./fields";
-import { getRecord, putRecord, refreshCard, type CardRecord } from "./intake";
+import {
+  closeAfterOutcome,
+  getRecord,
+  putRecord,
+  refreshCard,
+  type CardRecord,
+} from "./intake";
 
 const FEEDBACK_INPUT = "feedback";
 
@@ -98,9 +105,11 @@ export async function beginOutcome(
     getDirectorIds(env),
     getNumber(env, "decision_min_votes"),
   ]);
+  // settledPlacement, not agreedPlacement: after a discussion the ballots still
+  // disagree, and what the directors decided lives on the final record.
   const agreed =
     record.decision && decisionStatus(record.decision, directorIds, minVotes) === "accepted"
-      ? (agreedPlacement(record.decision, directorIds) ?? [])
+      ? (settledPlacement(record.decision, directorIds) ?? [])
       : [];
 
   const updated: CardRecord = {
@@ -139,11 +148,38 @@ export async function setPlacement(
  * Their notes are the raw material, not the message: this is composed once, at
  * outcome time, into the text the applicant will actually read.
  */
-export function outcomeFeedbackModal(row: number, record: CardRecord | null): unknown {
-  const notes = Object.values(record?.decision?.feedback ?? {})
-    .map((entry) => entry.text.trim())
-    .filter(Boolean)
-    .join("\n\n");
+/**
+ * The applicant-facing feedback, prefilled from the directors' notes.
+ *
+ * The count goes in the label because the box arrives already full: a director
+ * who opens this and finds words they didn't write has no way, from the text
+ * alone, to tell whether it's a colleague's note or a bug. The placeholder
+ * can't say so — a placeholder is invisible the moment there's a value.
+ */
+export function outcomeFeedbackModal(
+  row: number,
+  record: CardRecord | null,
+  directorIds: readonly string[] = [],
+): unknown {
+  const feedback = record?.decision?.feedback ?? {};
+  // Walked in roster order, like the card's own feedback fields, so the same
+  // set of notes always composes into the same text. Restricted to current
+  // directors too: a note from someone who has since left the roster is not
+  // something to put in front of an applicant.
+  const entries = directorIds
+    .map((id) => feedback[id]?.text.trim() ?? "")
+    .filter(Boolean);
+
+  // What was composed last time wins over recomposing from the raw notes.
+  // Redoing an outcome and finding your edits replaced by the notes you edited
+  // away reads as the box having forgotten, or worse, as the wrong applicant.
+  const composed = record?.outcome?.feedback?.trim() ?? "";
+  const notes = composed || entries.join("\n\n");
+  const label = composed
+    ? "They will read this — your last version"
+    : entries.length === 0
+      ? "They will read this"
+      : `They will read this — from ${entries.length} director note${entries.length === 1 ? "" : "s"}`;
 
   return {
     type: InteractionResponseType.MODAL,
@@ -158,7 +194,7 @@ export function outcomeFeedbackModal(row: number, record: CardRecord | null): un
               type: ComponentType.TEXT_INPUT,
               custom_id: FEEDBACK_INPUT,
               style: TextInputStyle.PARAGRAPH,
-              label: "They will read this",
+              label: label.slice(0, 45),
               placeholder: "Composed from the directors' notes — edit freely.",
               max_length: MODAL_TEXT_LIMIT,
               required: false,
@@ -245,7 +281,8 @@ export async function completeOutcome(
     wantsFeedback(cell(record.values, feedbackColumn)),
   );
 
-  const placed = formatSubunits(subunits);
+  // Spelled out, because the applicant has no reason to know what Spades is.
+  const placed = formatSubunitsLong(subunits);
   const merge: Record<string, string> = {
     name: application.name || "there",
     subunits: placed,
@@ -283,6 +320,7 @@ export async function completeOutcome(
     content: rendered.body,
     target: { kind: "email", to: email, subject: rendered.subject },
     confirmation: { guild: "community", channel: env.CH_AUDITION_REVIEW },
+    confirmationChannelId: record.threadId,
     meta: { hook: "application-outcome", row: String(row) },
   });
   if (!draft.ok) return { content: `❌ ${draft.reason}` };
@@ -310,7 +348,7 @@ export async function completeOutcome(
 
   const placement = subunits.length > 0 ? ` (${formatSubunits(subunits)})` : "";
   return {
-    content: `Recorded **${OUTCOME_LABEL[outcome]}**${placement} and drafted the *${templateKey}* email. **Nothing is sent** until someone approves it in #${env.CH_AUDITION_REVIEW}.`,
+    content: `Recorded **${OUTCOME_LABEL[outcome]}**${placement} and drafted the *${templateKey}* email. **Nothing is sent** until someone approves it ${describeConfirmation(draft.draft, record.threadId)}.`,
   };
 }
 
@@ -325,8 +363,32 @@ export async function onOutcomePublished(env: Env, draft: Draft): Promise<void> 
 
   const outcome: OutcomeRecord = { ...record.outcome, sentAt: new Date().toISOString() };
   const updated: CardRecord = { ...record, outcome };
-  await putRecord(env, updated);
-  await refreshCard(env, updated);
+
+  // A welcome or a rejection is the end of the application: the decision is
+  // made and the applicant has been told. A waitlist is not - it is meant to
+  // resurface when a spot opens, so that card stays live.
+  if (outcome.outcome === "waitlisted") {
+    await putRecord(env, updated);
+    await refreshCard(env, updated);
+    return;
+  }
+  await closeAfterOutcome(env, updated);
 }
 
 registerPublishHook("application-outcome", onOutcomePublished);
+
+/**
+ * [Skip interview — jump to results].
+ *
+ * Only reveals the three outcome buttons; it records nothing and decides
+ * nothing. The interview stays available, in case skipping it turns out to have
+ * been the wrong call.
+ */
+export async function revealOutcomes(env: Env, row: number): Promise<void> {
+  const record = await getRecord(env, row);
+  if (!record || record.outcomesRevealed) return;
+
+  const updated: CardRecord = { ...record, outcomesRevealed: true };
+  await putRecord(env, updated);
+  await refreshCard(env, updated);
+}

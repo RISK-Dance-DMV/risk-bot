@@ -107,10 +107,10 @@ function applicationSheet_() {
     );
   }
 
-  var idMatch = url.match(/\/spreadsheets\/d\/([\w-]+)/);
-  if (!idMatch) fail_("APPLICATION_SHEET_URL doesn't look like a Google Sheets URL");
+  var id = spreadsheetIdFrom_(url);
+  if (!id) fail_("APPLICATION_SHEET_URL doesn't look like a Google Sheets URL");
 
-  var ss = SpreadsheetApp.openById(idMatch[1]);
+  var ss = SpreadsheetApp.openById(id);
   var gidMatch = url.match(/[?#&]gid=(\d+)/);
   if (!gidMatch) return ss.getSheets()[0];
 
@@ -443,12 +443,44 @@ function onAuditionFormSubmit(e) {
  * Rendering happens in the Worker so a director can eyeball and edit the exact
  * text before it goes anywhere.
  */
+/**
+ * Pulls a spreadsheet id out of whatever was pasted - a bare id or a full URL.
+ *
+ * A property called ...SHEET_ID invites pasting the URL from the address bar,
+ * and openById's failure ("Illegal spreadsheet id or key") doesn't say that's
+ * what happened.
+ */
+function spreadsheetIdFrom_(value) {
+  var text = String(value || "").trim();
+  var fromUrl = text.match(/\/spreadsheets\/d\/([\w-]+)/);
+  return fromUrl ? fromUrl[1] : text;
+}
+
 function templatesSheet_() {
-  var id = props_().getProperty("TEMPLATES_SHEET_ID");
-  if (!id) fail_("TEMPLATES_SHEET_ID is not set");
+  var raw = props_().getProperty("TEMPLATES_SHEET_ID");
+  if (!raw) fail_("TEMPLATES_SHEET_ID is not set");
+
+  var id = spreadsheetIdFrom_(raw);
+  var ss;
+  try {
+    ss = SpreadsheetApp.openById(id);
+  } catch (err) {
+    fail_(
+      "couldn't open the templates spreadsheet from TEMPLATES_SHEET_ID. Paste the " +
+        "sheet's URL or its id (the long string between /d/ and /edit). (" + err + ")"
+    );
+  }
+
   var name = props_().getProperty("TEMPLATES_SHEET_NAME") || "Templates";
-  var sheet = SpreadsheetApp.openById(id).getSheetByName(name);
-  if (!sheet) fail_('templates tab "' + name + '" not found');
+  var sheet = ss.getSheetByName(name);
+  if (!sheet) {
+    var tabs = ss.getSheets().map(function (s) { return s.getName(); });
+    fail_(
+      'templates tab "' + name + '" not found in "' + ss.getName() +
+        '". Tabs present: ' + tabs.join(", ") +
+        '. Set TEMPLATES_SHEET_NAME to one of them.'
+    );
+  }
   return sheet;
 }
 
@@ -488,32 +520,44 @@ function sendEmail_(params) {
  * Creates the interview event and invites the applicant.
  *
  * This runs here, not through the service account: a service account cannot add
- * guests without domain-wide delegation. Times arrive as the local date and time
- * the director typed, and are built in the script's own timezone rather than
- * being converted twice.
+ * guests without domain-wide delegation.
+ *
+ * The Worker sends startsAt, an absolute instant it resolved against
+ * config:timezone, so the event does not depend on this project's ambient
+ * timezone setting. date/time are still accepted for an older caller, and are
+ * built in the script's own timezone as before.
  */
 function createInterviewEvent_(params) {
   var date = String(params.date || "");
   var time = String(params.time || "");
-  var minutes = Number(params.durationMinutes || 30);
+  // Matches DEFAULT_MINUTES in the Worker. The Worker always sends one; a
+  // fallback that disagreed would book a different meeting than the card shows.
+  var minutes = Number(params.durationMinutes || 60);
   var guest = String(params.guestEmail || "").trim();
+  var extra = params.guests || [];
 
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) fail_("date must be YYYY-MM-DD");
-  if (!/^\d{2}:\d{2}$/.test(time)) fail_("time must be HH:MM");
   if (!(minutes > 0 && minutes <= 480)) fail_("duration must be 1-480 minutes");
   if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(guest)) fail_('"' + guest + '" is not an email address');
 
-  var parts = date.split("-");
-  var clock = time.split(":");
-  var start = new Date(
-    Number(parts[0]),
-    Number(parts[1]) - 1,
-    Number(parts[2]),
-    Number(clock[0]),
-    Number(clock[1]),
-    0
-  );
-  if (isNaN(start.getTime())) fail_("couldn't build a date from " + date + " " + time);
+  var start;
+  if (params.startsAt) {
+    start = new Date(String(params.startsAt));
+    if (isNaN(start.getTime())) fail_("couldn't read startsAt: " + params.startsAt);
+  } else {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) fail_("date must be YYYY-MM-DD");
+    if (!/^\d{2}:\d{2}$/.test(time)) fail_("time must be HH:MM");
+    var parts = date.split("-");
+    var clock = time.split(":");
+    start = new Date(
+      Number(parts[0]),
+      Number(parts[1]) - 1,
+      Number(parts[2]),
+      Number(clock[0]),
+      Number(clock[1]),
+      0
+    );
+    if (isNaN(start.getTime())) fail_("couldn't build a date from " + date + " " + time);
+  }
   var end = new Date(start.getTime() + minutes * 60 * 1000);
 
   var calendarId = props_().getProperty("INTERVIEW_CALENDAR_ID");
@@ -522,8 +566,16 @@ function createInterviewEvent_(params) {
     : CalendarApp.getDefaultCalendar();
   if (!calendar) fail_("interview calendar not found: " + calendarId);
 
+  // Everyone who should be in the room, deduped - Calendar takes one
+  // comma-separated string.
+  var invited = [guest];
+  for (var i = 0; i < extra.length; i++) {
+    var one = String(extra[i] || "").trim();
+    if (one && invited.indexOf(one) === -1) invited.push(one);
+  }
+
   var event = calendar.createEvent(String(params.title || "RISK interview"), start, end, {
-    guests: guest,
+    guests: invited.join(","),
     sendInvites: true,
     description: String(params.description || ""),
   });
@@ -533,5 +585,6 @@ function createInterviewEvent_(params) {
     startsAt: start.toISOString(),
     endsAt: end.toISOString(),
     timeZone: calendar.getTimeZone(),
+    guests: invited,
   };
 }
