@@ -196,23 +196,6 @@ export interface RoundRecord {
   /** Set once the "last day to start is coming" nudge has gone out, likewise. */
   startNudgedAt?: string;
   /**
-   * Roughly when they said they'd start this round, as a plain day.
-   *
-   * Per round rather than once at registration, because under rolling rounds
-   * each round is a separate decision about when to find three days — and
-   * because the estimate is only useful while it's recent. One guessed in
-   * November about a round they'll reach in December is not a plan, it's a mood.
-   *
-   * Not binding on anyone, and the bot never refuses anything on the strength
-   * of it. What it does is two things: it lets directors see the review stream
-   * coming, and it gives the dancer a date of their own choosing to be reminded
-   * of — which, for work nobody is scheduling on your behalf, is most of what
-   * actually gets it done.
-   */
-  plannedStartAt?: string;
-  /** Set once the "you said today" reminder has gone out, once. */
-  plannedRemindedAt?: string;
-  /**
    * Set when the result has actually been sent to the dancer.
    *
    * The freeze point. Round 2's outcome is *derived* from the scores and the
@@ -724,8 +707,8 @@ export function feedbackReady(record: DiamondsRecord, round: Round): Check {
   return {
     ok: false,
     reason:
-      "Your feedback hasn't reached you yet, and Round 1 is a response to it — " +
-      "there's nothing to work on until it arrives. Nothing's wrong on your end.",
+      "Your Round 0 feedback hasn't gone out yet, and Round 1 is a response to " +
+      "it. It'll arrive with your piece.",
   };
 }
 
@@ -832,9 +815,7 @@ export function pieceReady(entry: RoundRecord): Check {
   if (!entry.assignedPiece) {
     return {
       ok: false,
-      reason:
-        "Your piece isn't up yet. Nothing's wrong on your end — try again once " +
-        "the directors have posted it.",
+      reason: "Your piece isn't up yet. It'll arrive here when it is.",
     };
   }
   return { ok: true };
@@ -865,11 +846,11 @@ export function visiblePiece(
  */
 export function startWarning(reveal: Reveal, windowDays: number): string {
   return reveal === "on-start"
-    ? `Pressing this shows you your piece **and starts your clock at the same ` +
-        `time.** From that moment you have ${windowDays} days to learn it, record ` +
-        `it and submit. There's no way to un-press it.`
-    : `Pressing this starts your clock. From that moment you have ${windowDays} ` +
-        `days to record and submit.`;
+    ? `**Pressing this shows you the piece and starts your clock.** You then ` +
+        `have ${windowDays} days to learn it, record it and submit. It can't be ` +
+        `undone.`
+    : `**Pressing this starts your clock.** You then have ${windowDays} days to ` +
+        `record and submit. It can't be undone.`;
 }
 
 /**
@@ -981,57 +962,6 @@ export function needsStartHeadsUp(
   return waiting >= headsUpDays * 24 * 60 * 60 * 1000;
 }
 
-/**
- * Whether a day is a sensible thing to plan this round's start for.
- *
- * Validated rather than taken on trust, because a plan the bot can't honour is
- * worse than no plan: they'd be waiting for a reminder on a day they were never
- * able to start, and the first they'd hear of it is a refusal.
- */
-export function canPlanStart(
-  record: DiamondsRecord,
-  round: Round,
-  day: string,
-  now: Date,
-): Check {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) {
-    return { ok: false, reason: "Give the date as YYYY-MM-DD, like `2026-11-29`." };
-  }
-  // Noon, so the comparison is about the day rather than about a timezone.
-  const at = new Date(`${day}T12:00:00Z`).getTime();
-  if (Number.isNaN(at)) return { ok: false, reason: `\`${day}\` isn't a real date.` };
-
-  if (at < now.getTime() - 24 * 60 * 60 * 1000) {
-    return { ok: false, reason: "That day has already gone — pick one from today onwards." };
-  }
-
-  // No upper bound either, now that nothing shared closes. A date two months
-  // out is a reasonable thing for someone renewing to plan, and the only clock
-  // it could collide with is their own enforcement date — which they can see.
-
-  // No lower bound beyond today: Round 1's gate is the feedback arriving, not a
-  // date, and someone planning ahead of it is making a reasonable guess about
-  // when we'll get back to them rather than a mistake.
-  return { ok: true };
-}
-
-/**
- * Whether today is the day they said they'd start.
- *
- * Due *on* the day rather than from it onwards, the same way rank 7's session
- * reminders work: a job that missed its window should stay quiet rather than
- * say "today's the day" two days late.
- */
-export function needsPlanReminder(
-  entry: RoundRecord,
-  windowDays: number,
-  now: Date,
-): boolean {
-  if (!entry.plannedStartAt || entry.plannedRemindedAt) return false;
-  if (entry.windowOpenedAt || entry.submittedAt) return false;
-  if (windowState(entry, windowDays, now) === "unavailable") return false;
-  return entry.plannedStartAt === now.toISOString().slice(0, 10);
-}
 
 /**
  * And the one for someone who registered and then never submitted Round 0.
@@ -1290,6 +1220,27 @@ function endedAs(record: DiamondsRecord): { outcome?: RoundOutcome; finishedAt?:
  * months when the target month is shorter. Over rather than under on purpose:
  * the wait should never come out shorter than the number says.
  */
+/**
+ * `months` after an instant, in whole calendar months.
+ *
+ * Shared by the wait itself and by the message that quotes it, so a dancer
+ * reading "you can audition again from the 20th" and the command that refuses
+ * them on the 19th are working from the same arithmetic rather than two copies
+ * of it.
+ */
+export function waitEndsAt(from: string, months: number): string {
+  const at = new Date(from);
+  return new Date(
+    Date.UTC(
+      at.getUTCFullYear(),
+      at.getUTCMonth() + months,
+      at.getUTCDate(),
+      at.getUTCHours(),
+      at.getUTCMinutes(),
+    ),
+  ).toISOString();
+}
+
 export function retryBlockedUntil(
   record: DiamondsRecord,
   months: number,
@@ -1320,16 +1271,7 @@ export function retryBlockedUntil(
   // judged hasn't failed anything, so there is no wait to serve — and a wait
   // after practice would make asking for it the riskier choice.
   if (!record.withdrawnAt && !record.expiredAt && ended.outcome === "practice") return undefined;
-  const until = new Date(
-    Date.UTC(
-      from.getUTCFullYear(),
-      from.getUTCMonth() + months,
-      from.getUTCDate(),
-      from.getUTCHours(),
-      from.getUTCMinutes(),
-    ),
-  );
-  return until.toISOString();
+  return waitEndsAt(from.toISOString(), months);
 }
 
 /** Whether that wait is still running. */

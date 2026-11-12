@@ -107,14 +107,12 @@ import {
   assignToAll,
   answerAsk,
   askForDays,
-  carryAsPractice,
   fileFeedback,
   getRecord,
   grantExtension,
   grantMembership,
   noteRound,
   panelContext,
-  planStart,
   register,
   runDiamondsSweep,
   scoreRound,
@@ -296,7 +294,12 @@ const REVIEWED = new Date("2026-11-19T09:00:00Z");
 const LATER = new Date("2026-11-24T09:00:00Z");
 
 beforeEach(() => {
-  sendDirectMessage.mockClear();
+  // `mockReset` rather than `mockClear`, because a `mockResolvedValueOnce` that
+  // a test queued and didn't consume survives `mockClear` and then fires inside
+  // whichever test runs next — which is a failure that looks like a bug in the
+  // code and isn't. Reset drops the queue, so the default has to be set again.
+  sendDirectMessage.mockReset();
+  sendDirectMessage.mockResolvedValue(true);
   postToChannelByName.mockClear();
   postToChannelByName.mockResolvedValue({ id: "msg1", channelId: "chan1" });
   editMessage.mockClear();
@@ -538,6 +541,7 @@ describe("the review card", () => {
                 submissionUrl: "https://after",
                 reviewMessageId: "msg1",
                 reviewChannelId: "chan1",
+                feedback: { d1: { text: "Arms much better.", at: "x" } },
                 ballots: { d1: { targetScore: 8, at: "2026-11-19T00:00:00.000Z" } },
               },
             },
@@ -661,6 +665,7 @@ describe("the review card", () => {
                 submissionUrl: "https://after",
                 reviewMessageId: "msg1",
                 reviewChannelId: "chan1",
+                feedback: { d1: { text: "Arms much better.", at: "x" } },
                 ballots: {
                   d1: { targetScore: 8, at: "2026-11-19T00:00:00.000Z" },
                   d2: { targetScore: 8, at: "2026-11-19T00:00:00.000Z" },
@@ -743,6 +748,7 @@ describe("the review card's buttons", () => {
                 submissionUrl: "https://after",
                 reviewMessageId: "msg1",
                 reviewChannelId: "chan1",
+                feedback: { d1: { text: "Arms much better.", at: "x" } },
                 ballots: { d1: { targetScore: 8, at: "2026-11-19T00:00:00.000Z" } },
               },
             },
@@ -770,6 +776,7 @@ describe("the review card's buttons", () => {
                 submissionUrl: "https://after",
                 reviewMessageId: "msg1",
                 reviewChannelId: "chan1",
+                feedback: { d1: { text: "Arms much better.", at: "x" } },
                 ballots: {
                   d1: { targetScore: 8, at: "2026-11-19T00:00:00.000Z" },
                   d2: { targetScore: 8, at: "2026-11-19T00:00:00.000Z" },
@@ -865,6 +872,9 @@ describe("membership", () => {
             d1: { scores: { ...eights }, at: "2026-11-23T00:00:00.000Z" },
             d2: { scores: { ...eights }, at: "2026-11-23T00:00:00.000Z" },
           },
+          // A written note, because no result goes out without one — the
+          // scores never reach the dancer, so this is the whole message.
+          feedback: { d1: { text: "Lines held all the way through.", at: "x" } },
         },
       },
       ...sealed,
@@ -1128,7 +1138,7 @@ describe("the renewal notices", () => {
 
     const sent = String(sendDirectMessage.mock.calls[0]?.[2]?.content);
     expect(sent).toMatch(/12 days/);
-    expect(sent).toMatch(/come off the Diamonds role/);
+    expect(sent).toMatch(/the Diamonds role comes off/);
 
     const marked = (await getRecord(env, "100"))?.renewalNoticedAt ?? {};
     expect(Object.keys(marked).sort()).toEqual(["20", "30", "60"]);
@@ -1630,9 +1640,12 @@ describe("a failed renewal, start to finish", () => {
     expect(run.renewals).toBe(1);
     const sent = String(sendDirectMessage.mock.calls[0]?.[2]?.content);
     expect(sent).toMatch(/can't re-audition before/);
-    expect(sent).toMatch(/Talk to a director/);
-    // Never tells them to do the thing they are barred from doing.
-    expect(sent).not.toMatch(/re-audition before then and it renews/);
+    expect(sent).toMatch(/Questions to a director/);
+    // Never tells them to do the thing they are barred from doing, and never
+    // suggests the date is negotiable.
+    // "renewal date" is fine; being told to renew is not.
+    expect(sent).not.toMatch(/Re-auditioning before then/);
+    expect(sent).not.toMatch(/put you back on/);
   });
 
   it("takes the role off on their date", async () => {
@@ -1815,7 +1828,7 @@ describe("starting a window", () => {
   it("shows nothing but the warning before it's pressed", () => {
     const panel = roundPanel(assigned(), 2, CTX, now);
     expect(panel.content).not.toContain("https://piece");
-    expect(panel.content).toMatch(/no way to un-press it/);
+    expect(panel.content).toMatch(/can.t be undone/);
     expect(panel.components).toBeTruthy();
   });
 
@@ -2055,80 +2068,14 @@ describe("the daily sweep", () => {
   });
 
   /**
-   * The heads-up counts from when their own window became startable, not from
-   * the cliff — under rolling rounds the cliff can be two months off, and a
-   * nudge pegged to it would let someone sit on a piece for seven weeks in
-   * silence.
-   */
-  it("nudges someone sitting on a piece, counted from when it went up", async () => {
-    const { env } = envWith(
-      Object.fromEntries([
-        seed(
-          dancer({
-            document: feedbackSent(),
-            rounds: {
-              0: { submittedAt: "2026-11-16T00:00:00.000Z" },
-              1: { assignedPiece: "https://p", assignedAt: "2026-11-20T00:00:00.000Z" },
-            },
-          }),
-        ),
-      ]),
-    );
-    // Ten days after the piece went up, not ten days before January — the close
-    // date is seven weeks off and a nudge pegged to it would say nothing until
-    // then.
-    expect(
-      await runDiamondsSweep(env, TIMELINE, POLICY, new Date("2026-11-28T00:00:00Z")),
-    ).toEqual(quiet);
-
-    const due = new Date("2026-12-01T00:00:00Z");
-    expect(await runDiamondsSweep(env, TIMELINE, POLICY, due)).toEqual({ ...quiet, headsUp: 1 });
-    const sent = sendDirectMessage.mock.calls[0]![2];
-    expect(sent.content!).toMatch(/waiting 10/);
-    // It must not spoil the reveal it's nudging them towards.
-    expect(sent.content!).not.toContain("https://p");
-    expect(await runDiamondsSweep(env, TIMELINE, POLICY, due)).toEqual(quiet);
-  });
-
-  /**
-   * The last-chance nudge went with the close date it counted back from. What's
-   * left is the heads-up, which counts from the assignment — a fact about them
-   * rather than about a calendar nobody shares any more.
-   */
-  it("says nothing about a cliff, because there isn't one", async () => {
-    const { env } = envWith(
-      Object.fromEntries([
-        seed(
-          dancer({
-            rounds: {
-              2: { assignedPiece: "https://p", assignedAt: "2027-01-05T00:00:00.000Z" },
-              1: { submittedAt: "2027-01-04T00:00:00.000Z" },
-            },
-          }),
-        ),
-      ]),
-    );
-    // Two days in: too early even for the heads-up, and there is nothing else.
-    expect(
-      await runDiamondsSweep(env, TIMELINE, POLICY, new Date("2027-01-07T00:00:00Z")),
-    ).toEqual(quiet);
-
-    // Ten days in, and the only thing that fires is the heads-up.
-    expect(
-      await runDiamondsSweep(env, TIMELINE, POLICY, new Date("2027-01-15T00:00:00Z")),
-    ).toEqual({ ...quiet, headsUp: 1 });
-    expect(sendDirectMessage.mock.calls[0]![2].content!).toMatch(/waiting 10 days/);
-    expect(sendDirectMessage.mock.calls[0]![2].content!).not.toMatch(/last chance|close/i);
-  });
-
-  /**
-   * The one nobody else can reach: registered, never submitted, no window to
-   * key off and no piece to wait on.
-   */
-  /**
-   * Only reachable through `/diamonds add` now — registering is sending the
-   * cover, so a dancer can't put themselves in this state. Kept because someone
-   * a director added is the person least likely to know what they owe.
+   * The only nudge left that isn't about a clock. Reachable through
+   * `/diamonds add` alone — registering is sending the cover, so a dancer can't
+   * put themselves in this state — and kept because somebody a director added
+   * is the person least likely to know what they owe.
+   *
+   * The two that used to sit beside it are gone: the planned-start reminder and
+   * the ten-days-on-a-piece heads-up. The 60-day clock reminds people on its
+   * own schedule, and three messages about one fact is two too many.
    */
   it("nudges somebody a director added who hasn't sent a cover", async () => {
     const { env } = envWith(Object.fromEntries([seed(dancer({ registeredAt: "2026-11-20T00:00:00.000Z" }))]));
@@ -2139,9 +2086,11 @@ describe("the daily sweep", () => {
     const due = new Date("2026-11-30T00:00:00Z");
     expect(await runDiamondsSweep(env, TIMELINE, POLICY, due)).toEqual({ ...quiet, round0: 1 });
     const said = sendDirectMessage.mock.calls[0]![2].content!;
-    expect(said).toMatch(/haven't got a cover from you/);
+    expect(said).toMatch(/don't have your cover yet/);
     // Says why they didn't register themselves, because that's the confusing part.
-    expect(said).toMatch(/A director put you on/);
+    expect(said).toMatch(/A director added you/);
+    // And ends the way every dancer-facing message does now.
+    expect(said).toMatch(/Questions to a director/);
     expect(await runDiamondsSweep(env, TIMELINE, POLICY, due)).toEqual(quiet);
   });
 
@@ -2321,9 +2270,11 @@ describe("the Round 1 target", () => {
       },
     });
     const panel = roundPanel(record, 1, CTX, new Date("2026-11-25T12:00:00Z"));
+    // The thing, in words. **Never the number** — the panel used to quote both
+    // the starting read and the score to beat, and that turned the round into a
+    // figure to chase instead of a thing to fix.
     expect(panel.content).toContain("timing drifts late in the second eight");
-    expect(panel.content).toMatch(/4\.0\/10/);
-    expect(panel.content).toMatch(/Round 2 scores the four dimensions/);
+    expect(panel.content).not.toMatch(/\d\/10|\d\.\d/);
   });
 
   /** A document that didn't arrive hasn't opened anything. */
@@ -2441,32 +2392,24 @@ describe("the director's readout", () => {
     expect(readout.content).toMatch(/waiting on another director/);
   });
 
-  it("shows the estimate for whichever round they're in", async () => {
+  /**
+   * The estimate used to be on this line, and `/diamonds plan` went with it.
+   * What's there instead is the days they have left, which is the thing the
+   * roster is actually for — a date somebody guessed at was never what told you
+   * when to expect them.
+   */
+  it("shows the days each of them has left", async () => {
     const { env } = envWith(
       Object.fromEntries([
-        seed(dancer({ rounds: { 0: { plannedStartAt: "2026-11-29" } } })),
-        seed(
-          dancer({
-            discordId: "200",
-            ...sealed,
-            document: feedbackSent(),
-            rounds: {
-              0: { ...zeroPassed(), plannedStartAt: "2026-11-20" },
-              1: {
-                assignedPiece: "p",
-                assignedAt: "2026-11-18T00:00:00.000Z",
-                plannedStartAt: "2026-12-02",
-              },
-            },
-          }),
-        ),
+        seed(dancer({ registeredAt: "2026-11-16T00:00:00.000Z" })),
+        // No registration date, so no clock and nothing to show.
+        seed(dancer({ discordId: "200", registeredAt: undefined })),
       ]),
     );
     const readout = rosterReadout(await allRecords(env), CTX, now);
-    expect(readout.content).toContain("plans 2026-11-29");
-    // Round 1's estimate, not the stale Round 0 one.
-    expect(readout.content).toContain("plans 2026-12-02");
-    expect(readout.content).not.toContain("plans 2026-11-20");
+    expect(readout.content).toMatch(/<@100> .*· \d+d left/);
+    expect(readout.content).not.toMatch(/<@200> .*d left/);
+    expect(readout.content).not.toContain("plans");
   });
 
   it("puts a newcomer who owes a cover on the other side from a Round 0 we owe", async () => {
@@ -2520,102 +2463,6 @@ describe("the start button's custom id", () => {
  * when to find three days — and because an estimate guessed in November about a
  * round reached in December is not a plan.
  */
-describe("saying when you'll start", () => {
-  /** Piece up NOV 28, so the ten-day heads-up isn't due until DEC 8. */
-  const assigned = (over: Record<string, unknown> = {}) =>
-    dancer({
-      registeredAt: "2026-11-16T00:00:00.000Z",
-      document: feedbackSent("2026-11-27T00:00:00.000Z"),
-      rounds: {
-        0: { submittedAt: "2026-11-16T00:00:00.000Z" },
-        1: { assignedPiece: "https://p", assignedAt: "2026-11-28T00:00:00.000Z", ...over },
-      },
-    });
-  const now = new Date("2026-11-28T09:00:00Z");
-
-  it("records a day and says it can move", async () => {
-    const { env } = envWith(Object.fromEntries([seed(assigned())]));
-    const result = await planStart(env, "100", 1, "2026-12-02", TIMELINE, POLICY, now);
-    expect(result.ok).toBe(true);
-    expect(roundOf((await getRecord(env, "100"))!, 1).plannedStartAt).toBe("2026-12-02");
-  });
-
-  /**
-   * Validated rather than trusted: a plan the bot can't honour is worse than no
-   * plan, because they'd be waiting for a reminder on a day they were never able
-   * to start.
-   */
-  it("refuses a day they couldn't start on", async () => {
-    const { env } = envWith(Object.fromEntries([seed(assigned())]));
-
-    // No upper bound any more: a date months out is a reasonable plan for
-    // someone renewing, and the only clock it could meet is their own date.
-    expect((await planStart(env, "100", 1, "2027-06-09", TIMELINE, POLICY, now)).ok).toBe(true);
-
-    const gone = await planStart(env, "100", 1, "2026-11-20", TIMELINE, POLICY, now);
-    expect(gone.ok).toBe(false);
-    expect(gone.ok === false && gone.reason).toMatch(/already gone/);
-
-    expect((await planStart(env, "100", 1, "the 2nd", TIMELINE, POLICY, now)).ok).toBe(false);
-  });
-
-  /**
-   * **The estimate no longer sends anything.** It used to DM them on the
-   * morning they'd picked; that message is gone, and the date stays for the
-   * roster — a date somebody volunteered isn't a commitment, and chasing them
-   * about one turns a helpful guess into a thing they'd rather not have offered.
-   */
-  it("says nothing on the day they picked", async () => {
-    const { env } = envWith(
-      Object.fromEntries([seed(assigned({ plannedStartAt: "2026-12-02" }))]),
-    );
-    expect(
-      await runDiamondsSweep(env, TIMELINE, POLICY, new Date("2026-12-02T09:00:00Z")),
-    ).toEqual(quiet);
-    expect(sendDirectMessage).not.toHaveBeenCalled();
-  });
-
-  it("still records it, and still clears the marker when they move it", async () => {
-    const { env } = envWith(
-      Object.fromEntries([
-        seed(
-          assigned({
-            plannedStartAt: "2026-12-02",
-            plannedRemindedAt: "2026-12-02T09:00:00.000Z",
-          }),
-        ),
-      ]),
-    );
-    await planStart(env, "100", 1, "2026-12-09", TIMELINE, POLICY, now);
-    const entry = roundOf((await getRecord(env, "100"))!, 1);
-    expect(entry.plannedStartAt).toBe("2026-12-09");
-    expect(entry.plannedRemindedAt).toBeUndefined();
-  });
-
-  it("says nothing once they've started", async () => {
-    const { env } = envWith(
-      Object.fromEntries([
-        seed(
-          assigned({
-            plannedStartAt: "2026-12-02",
-            windowOpenedAt: "2026-12-01T09:00:00.000Z",
-          }),
-        ),
-      ]),
-    );
-    const result = await runDiamondsSweep(env, TIMELINE, POLICY, new Date("2026-12-02T09:00:00Z"));
-    expect(result.planned).toBe(0);
-  });
-
-  it("asks for one on the panel, and shows it once set", () => {
-    const blank = roundPanel(assigned(), 1, CTX, now);
-    expect(blank.content).toMatch(/Pick a day you'll start/);
-
-    const set = roundPanel(assigned({ plannedStartAt: "2026-12-02" }), 1, CTX, now);
-    expect(set.content).toMatch(/You said around 2026-12-02/);
-    expect(set.content).toMatch(/nothing happens if it slips/);
-  });
-});
 
 /**
  * One feedback path for both cohorts. The cohort decides only whether a cover
@@ -2698,7 +2545,7 @@ describe("feedback, for either cohort", () => {
     expect(JSON.stringify(sent.components)).toContain("dia|start|1");
     // And the warning that goes with it, because pressing it starts the clock.
     expect(sent.content!).toMatch(/starts your clock/);
-    expect(sent.content!).toMatch(/no way to un-press it/);
+    expect(sent.content!).toMatch(/can.t be undone/);
 
     // Round 1 is open on delivery now, so the button is live the moment it lands.
     const delivered = (await getRecord(env, "100"))!;
@@ -2728,7 +2575,7 @@ describe("feedback, for either cohort", () => {
     );
     await fileFeedback(env, "100", doc, "d1", TIMELINE, POLICY, OPEN);
     const sent = sendDirectMessage.mock.calls[0]![2];
-    expect(sent.content!).toMatch(/not taking this one through/);
+    expect(sent.content!).toMatch(/not to take this one through/);
 
     // Everything at once, unlike a pass. A pass holds the document because
     // opening it starts Round 1; a fail opens nothing, so a button in front of
@@ -2777,7 +2624,7 @@ describe("feedback, for either cohort", () => {
     const { env } = envWith(Object.fromEntries([seed(ready())]));
     const result = await takePractice(env, "100");
     expect(result.ok).toBe(false);
-    expect(result.ok === false && result.reason).toMatch(/isn't one/);
+    expect(result.ok === false && result.reason).toMatch(/haven.t got one/);
   });
 
   /**
@@ -2813,7 +2660,7 @@ describe("feedback, for either cohort", () => {
     expect(up.ok && up.record.document?.deliveredAt).toBe(REVIEWED.toISOString());
     // One message, not two — the notice is what tells them the piece exists.
     expect(sendDirectMessage).toHaveBeenCalledTimes(1);
-    expect(sendDirectMessage.mock.calls[0]![2].content!).toMatch(/piece is ready when you are/);
+    expect(sendDirectMessage.mock.calls[0]![2].content!).toMatch(/a piece we.ve picked for you/);
   });
 
   /** A split holds it too, and says which way each of them went. */
@@ -2923,7 +2770,11 @@ describe("scoring, end to end", () => {
             document: feedbackSent(),
             rounds: {
               0: zeroPassed(),
-              1: { assignedPiece: "p", submittedAt: "2026-12-01T00:00:00.000Z" },
+              1: {
+                assignedPiece: "p",
+                submittedAt: "2026-12-01T00:00:00.000Z",
+                feedback: { d1: { text: "Arms much better.", at: "x" } },
+              },
             },
           }),
         ),
@@ -3097,7 +2948,7 @@ describe("feedback on a round that ends in a result", () => {
     );
   });
 
-  it("sends the notes with the result, under their own heading", async () => {
+  it("sends the notes as the body of the result, with no scores", async () => {
     const { env } = envWith(
       Object.fromEntries([
         seed(
@@ -3111,11 +2962,18 @@ describe("feedback on a round that ends in a result", () => {
     const sent = await sendResult(env, "100", DIRECTORS, CTX, POLICY, now);
     expect(sent.ok).toBe(true);
     const dm = sendDirectMessage.mock.calls[0]![2].content!;
-    expect(dm).toMatch(/What the directors wrote/);
+    // The note IS the body now — no heading above it, and no scores anywhere.
     expect(dm).toContain("Elbows holding now.");
+    expect(dm).not.toMatch(/What the directors wrote/);
+    expect(dm).not.toMatch(/6\.5/);
   });
 
-  it("still sends a result nobody wrote anything for", async () => {
+  /**
+   * **Refused, not padded.** The scores don't reach the dancer, so a result
+   * with no written note would be a bare verdict — which is the thing the shape
+   * of these messages exists to prevent.
+   */
+  it("refuses to send a result nobody wrote anything for", async () => {
     const { env } = envWith(
       Object.fromEntries([
         seed(
@@ -3125,8 +2983,10 @@ describe("feedback on a round that ends in a result", () => {
         ),
       ]),
     );
-    expect((await sendResult(env, "100", DIRECTORS, CTX, POLICY, now)).ok).toBe(true);
-    expect(sendDirectMessage.mock.calls[0]![2].content!).not.toMatch(/directors wrote/);
+    const result = await sendResult(env, "100", DIRECTORS, CTX, POLICY, now);
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.reason).toMatch(/the feedback/);
+    expect(sendDirectMessage).not.toHaveBeenCalled();
   });
 
   it("points Round 0 at its own form instead", async () => {
@@ -3202,6 +3062,8 @@ describe("practice, asked for at the door", () => {
     await submit(env, "100", 1, "https://mine", TIMELINE, POLICY, joined);
     await scoreRound(env, "100", "d1", { targetScore: 4 }, POLICY, reviewed);
     await scoreRound(env, "100", "d2", { targetScore: 4 }, POLICY, reviewed);
+    // A note, because no result goes out without one.
+    await noteRound(env, "100", "d1", "Arms much better.", POLICY, reviewed);
 
     const sent = await sendResult(env, "100", DIRECTORS, CTX, POLICY, reviewed);
     expect(sent.ok && sent.outcome).toBe("practice");
@@ -3231,6 +3093,7 @@ describe("practice, asked for at the door", () => {
                   d1: { scores: { ...eights }, at: "2026-11-23T00:00:00.000Z" },
                   d2: { scores: { ...eights }, at: "2026-11-23T00:00:00.000Z" },
                 },
+                feedback: { d1: { text: "Strong all through.", at: "x" } },
               },
             },
             ...sealed,
@@ -3256,108 +3119,6 @@ describe("practice, asked for at the door", () => {
     const again = (await getRecord(env, "100"))!;
     expect(again.history).toHaveLength(1);
     expect(again.practiceFrom).toBeUndefined();
-  });
-});
-
-describe("carrying a failed Round 1 on as practice", () => {
-  /** A Round 1 both of them have scored, and it didn't move. */
-  const stuck = (over: Partial<DiamondsRecord> = {}): DiamondsRecord =>
-    dancer({
-      document: feedbackSent(),
-      rounds: {
-        0: zeroPassed(),
-        1: {
-          assignedPiece: "https://piece",
-          submittedAt: "2026-11-19T00:00:00.000Z",
-          ballots: {
-            d1: { targetScore: 4, at: "2026-11-20T00:00:00.000Z" },
-            d2: { targetScore: 4, at: "2026-11-20T00:00:00.000Z" },
-          },
-        },
-      },
-      ...sealed,
-      ...over,
-    });
-
-  const now = new Date("2026-11-21T10:00:00Z");
-
-  it("keeps the fail and keeps them going", async () => {
-    const { env } = envWith(Object.fromEntries([seed(stuck())]));
-    expect((await carryAsPractice(env, "100", POLICY)).ok).toBe(true);
-
-    const carried = (await getRecord(env, "100"))!;
-    expect(carried.practiceFrom).toBe(2);
-
-    const sent = await sendResult(env, "100", DIRECTORS, CTX, POLICY, now);
-    // The round still failed. Both facts are kept, because both are true.
-    expect(sent.ok && sent.outcome).toBe("failed");
-    const said = sendDirectMessage.mock.calls.at(-1)![2].content!;
-    expect(said).toMatch(/didn't move enough/);
-    expect(said).toMatch(/as practice/);
-
-    // And the audition doesn't end on it.
-    const after = (await getRecord(env, "100"))!;
-    expect(roundOf(after, 1).outcome).toBe("failed");
-    expect(activeRound(after, now)).toEqual({ ok: true, round: 2 });
-  });
-
-  it("offers the branch on the card, and only on a fail", () => {
-    const labels = (record: DiamondsRecord, round: Round) =>
-      JSON.stringify(reviewCard(record, round, tally(roundOf(record, round), 2), settleRound(record, round, POLICY), {
-        minScores: 2,
-        weights: DEFAULT_WEIGHTS,
-        bar: 7.5,
-        floor: 6,
-        commandChannel: "diamonds-bot",
-      }).components);
-
-    expect(labels(stuck(), 1)).toContain("Carry on as practice");
-    // Advanced: nothing to carry them out of.
-    const moved = stuck({
-      rounds: {
-        ...stuck().rounds,
-        1: {
-          ...stuck().rounds[1]!,
-          ballots: {
-            d1: { targetScore: 9, at: "2026-11-20T00:00:00.000Z" },
-            d2: { targetScore: 9, at: "2026-11-20T00:00:00.000Z" },
-          },
-        },
-      },
-    });
-    expect(labels(moved, 1)).not.toContain("Carry on as practice");
-    // Already practice: there is nowhere to carry them to.
-    expect(labels(stuck({ practiceFrom: 0 }), 1)).not.toContain("Carry on as practice");
-  });
-
-  it("refuses once they've already been told", async () => {
-    const told = stuck();
-    told.rounds[1]!.resultSentAt = "2026-11-20T12:00:00.000Z";
-    told.rounds[1]!.outcome = "failed";
-    const { env } = envWith(Object.fromEntries([seed(told)]));
-    const result = await carryAsPractice(env, "100", POLICY);
-    expect(result.ok).toBe(false);
-    expect(result.ok === false && result.reason).toMatch(/already been told/);
-  });
-
-  it("still ends in no wait, because Round 2 was practice", async () => {
-    const { env } = envWith(
-      Object.fromEntries([
-        seed(
-          stuck({
-            practiceFrom: 2,
-            rounds: {
-              0: zeroPassed(),
-              1: { submittedAt: "a", resultSentAt: "b", outcome: "failed" },
-              2: { submittedAt: "c", resultSentAt: "d", outcome: "practice" },
-            },
-          }),
-        ),
-      ]),
-    );
-    expect(
-      (await register(env, "100", "Ada", "new", COVER, TIMELINE, POLICY, new Date("2026-12-01T00:00:00Z"))).ok,
-    ).toBe(true);
   });
 });
 
@@ -3402,7 +3163,9 @@ describe("the two-month clock", () => {
     expect(said).toMatch(/days left on your audition/);
     // Points at a director before the date, not at an extension that no longer
     // exists: nothing can add days to a run, so the ask has to come early.
-    expect(said).toMatch(/the date rather than after/);
+    expect(said).toMatch(/Questions to a director/);
+    // And no longer suggests the deadline can be moved for them.
+    expect(said).not.toMatch(/put you back on|ask a director/i);
     expect(await runDiamondsSweep(env, TIMELINE, POLICY, tenOut)).toEqual(quiet);
   });
 
@@ -3635,6 +3398,7 @@ describe("a date that lands mid-audition", () => {
                   d1: { scores: { technicality: 8, execution: 8, performance: 8, musicality: 8 }, at: "e" },
                   d2: { scores: { technicality: 8, execution: 8, performance: 8, musicality: 8 }, at: "e" },
                 },
+                feedback: { d1: { text: "Strong all through.", at: "x" } },
               },
             },
           }),
@@ -3926,5 +3690,107 @@ describe("asking for more days", () => {
     const panel = roundPanel(refused, 1, CTX, now);
     expect(panel.content).toMatch(/was declined/);
     expect(panel.content).toContain("You've had two already.");
+  });
+});
+
+/**
+ * Nothing says the same thing twice, and nothing a dancer reads is a number.
+ *
+ * Written as assertions about the *whole* message rather than about a phrase,
+ * because both of these failed the same way when they failed: a wrapper and the
+ * body it wrapped each saying the verdict, and a score reaching a dancer from a
+ * surface nobody was looking at.
+ */
+describe("what a dancer's messages never contain", () => {
+  const doc = {
+    content: "A good season.",
+    strengths: ["clean lines", "good pockets", "committed"],
+    growthAreas: ["arms"],
+  };
+  const now = new Date("2026-11-18T00:00:00Z");
+
+  it("says the Round 0 verdict exactly once, on a pass and on a fail", async () => {
+    for (const [verdict, phrase] of [
+      ["pass", /through to Round 1/g],
+      ["fail", /not to take this one through/g],
+    ] as const) {
+      const { env } = envWith(
+        Object.fromEntries([
+          seed(
+            dancer({
+              cohort: "returning",
+              rounds: {
+                0: { ballots: { d1: { verdict, at: "x" }, d2: { verdict, at: "x" } } },
+                1: { assignedPiece: "https://piece" },
+              },
+              ...sealed,
+            }),
+          ),
+        ]),
+      );
+      await fileFeedback(env, "100", doc, "d1", TIMELINE, POLICY, now);
+      const sent = sendDirectMessage.mock.calls.at(-1)![2].content!;
+      expect(sent.match(phrase)).toHaveLength(1);
+      // And the document underneath carries no verdict of its own.
+      expect(sent).toContain("clean lines");
+      sendDirectMessage.mockClear();
+    }
+  });
+
+  it("puts no score in any result, in any round", async () => {
+    const scored = (round: Round, extra: Partial<DiamondsRecord> = {}) =>
+      dancer({
+        ...sealed,
+        document: feedbackSent(),
+        rounds: {
+          0: zeroPassed(),
+          ...(round === 2
+            ? { 1: { submittedAt: "a", resultSentAt: "b", outcome: "advanced" as const } }
+            : {}),
+          [round]: {
+            assignedPiece: "p",
+            submittedAt: "2026-11-20T00:00:00.000Z",
+            feedback: { d1: { text: "Arms much better.", at: "x" } },
+            ballots:
+              round === 1
+                ? { d1: { targetScore: 7, at: "x" }, d2: { targetScore: 7, at: "x" } }
+                : {
+                    d1: { scores: { technicality: 8, execution: 8, performance: 8, musicality: 8 }, at: "x" },
+                    d2: { scores: { technicality: 8, execution: 8, performance: 8, musicality: 8 }, at: "x" },
+                  },
+          },
+        },
+        ...extra,
+      });
+
+    for (const round of [1, 2] as Round[]) {
+      const { env } = envWith(Object.fromEntries([seed(scored(round))]));
+      const sent = await sendResult(env, "100", DIRECTORS, CTX, POLICY, new Date("2026-11-22T00:00:00Z"));
+      expect(sent.ok).toBe(true);
+      const dm = sendDirectMessage.mock.calls.at(-1)![2].content!;
+      // No decimals, no x/10, no weighted total — and the note is still there.
+      expect(dm).not.toMatch(/\d+\.\d|\/10|Weighted/);
+      expect(dm).toContain("Arms much better.");
+      sendDirectMessage.mockClear();
+    }
+  });
+
+  /** And the status panel doesn't list rounds they haven't reached. */
+  it("only shows the rounds they've got to", () => {
+    const fresh = dancer({ registeredAt: "2026-11-16T00:00:00.000Z", rounds: {} });
+    const freshPanel = statusPanel(fresh, 0, CTX, now).content!;
+    expect(freshPanel).toContain("Round 0 ·");
+    expect(freshPanel).not.toContain("Round 2 ·");
+
+    const done = dancer({
+      ...sealed,
+      document: feedbackSent(),
+      rounds: {
+        0: zeroPassed(),
+        1: { submittedAt: "a", resultSentAt: "b", outcome: "advanced" },
+        2: { assignedPiece: "p" },
+      },
+    });
+    expect(statusPanel(done, 2, CTX, now).content!).toContain("Round 2 ·");
   });
 });

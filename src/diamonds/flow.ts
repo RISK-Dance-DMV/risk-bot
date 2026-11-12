@@ -46,10 +46,10 @@ import {
   canSubmit,
   ballotComplete,
   ballotSplits,
-  canPlanStart,
   auditionFinished,
   auditionResulted,
   retryBlocked,
+  retryBlockedUntil,
   runDaysLeft,
   runEndsAt,
   runExpired,
@@ -65,7 +65,6 @@ import {
   feedbackSentOut,
   needsRound0Nudge,
   needsReminder,
-  needsStartHeadsUp,
   roundOf,
   roundToScore,
   fixTarget,
@@ -92,6 +91,7 @@ import {
   askCard,
   feedbackArrived,
   feedbackRefused,
+  resultComponents,
   resultMessage,
   reviewCard,
   roundPanel,
@@ -383,38 +383,6 @@ export async function withdraw(env: Env, discordId: string): Promise<FlowResult>
   const record = await getRecord(env, discordId);
   if (!record) return { ok: false, reason: "You're not registered for this audition." };
   const updated = { ...record, withdrawnAt: new Date().toISOString() };
-  await putRecord(env, updated);
-  return { ok: true, record: updated };
-}
-
-/**
- * Their own estimate of when they'll start this round.
- *
- * Changeable as often as they like, and nothing is ever refused on the strength
- * of it — what it buys is a reminder on a day they picked themselves, which for
- * work nobody else is scheduling is most of what gets it done.
- */
-export async function planStart(
-  env: Env,
-  discordId: string,
-  round: Round,
-  day: string,
-  timeline: DiamondsTimeline,
-  policy: DiamondsPolicy,
-  now: Date,
-): Promise<FlowResult> {
-  const record = await getRecord(env, discordId);
-  if (!record) return { ok: false, reason: "You're not registered for this audition." };
-
-  const allowed = canPlanStart(record, round, day.trim(), now);
-  if (!allowed.ok) return { ok: false, reason: allowed.reason };
-
-  // Clears the reminder marker, so moving the date moves the reminder with it
-  // rather than silently costing them one.
-  const updated = withRound(record, round, {
-    plannedStartAt: day.trim(),
-    plannedRemindedAt: undefined,
-  });
   await putRecord(env, updated);
   return { ok: true, record: updated };
 }
@@ -814,8 +782,9 @@ export function panelContext(
     reviewMaxDays: policy.reviewMaxDays,
     minScores: policy.minScores,
     retryMonths: policy.retryMonths,
-    bar: policy.bar,
-    requiredSteps: policy.requiredSteps,
+    // No `bar` and no `requiredSteps`. The panels are what a dancer reads, and
+    // nothing they read contains a score — so the context they're built from
+    // can't reach one either.
     runDays: policy.runDays,
   };
 }
@@ -1063,13 +1032,7 @@ async function deliverDocument(
   // Both get the whole document. Nothing a dancer is owed sits behind a click,
   // and the feedback is owed either way — what differs is what comes after it:
   // a pass has a button to the next round, a fail has one to practice.
-  const written = feedbackMessage(
-    doc.content,
-    doc.strengths,
-    doc.growthAreas,
-    passed,
-    policy,
-  ).content!;
+  const written = feedbackMessage(doc.content, doc.strengths, doc.growthAreas);
   const reached = await sendDirectMessage(
     env,
     record.discordId,
@@ -1110,55 +1073,44 @@ export async function takePractice(env: Env, discordId: string): Promise<FlowRes
   if (record.practiceFrom !== undefined) {
     return { ok: false, reason: "You're already down as practice — nothing to change." };
   }
-  if (roundOf(record, 0).outcome !== "failed") {
+
+  // Whichever round didn't go through — practice starts after it. Round 0's
+  // fail puts them in Round 1, Round 1's in Round 2. Round 2 has no round after
+  // it, so there's nothing to offer and nothing to take.
+  const failed = ([0, 1] as Round[]).find((round) => roundOf(record, round).outcome === "failed");
+  if (failed === undefined) {
     return {
       ok: false,
       reason:
-        "That offer goes with a Round 0 we didn't take through, and yours isn't " +
-        "one. Nothing to do here.",
+        "That offer goes with a round we didn't take through, and you haven't " +
+        "got one. Nothing to do here.",
     };
   }
 
-  const practising: DiamondsRecord = { ...record, practiceFrom: 1 };
+  const practising: DiamondsRecord = { ...record, practiceFrom: (failed + 1) as Round };
   await putRecord(env, practising);
   return { ok: true, record: practising };
 }
 
 /**
- * Round 0's one message: the verdict, and everything behind it.
+ * The written feedback, and nothing else.
  *
- * The decision comes last rather than first. A pass or a fail at the top turns
- * the three paragraphs under it into either a formality or a consolation, and
- * neither is what they are — the feedback is the part that's worth something in
- * both directions, and it's the only part a dancer who didn't get through can
- * still use.
+ * **No verdict in here.** It carried one — a closing paragraph per outcome —
+ * and both of them said what the message wrapping this already said, word for
+ * word in the case of a fail. The wrapper owns the decision and what happens
+ * next; this owns what the directors actually watched. One fact, one place.
  */
 export function feedbackMessage(
   content: string,
   strengths: readonly string[],
   growthAreas: readonly string[],
-  passed: boolean,
-  policy: DiamondsPolicy,
-): MessagePayload {
+): string {
   const list = (items: readonly string[]) => items.map((one) => `· ${one}`).join("\n");
-  return {
-    content:
-      `**Your Diamonds feedback**\n\n${content}\n\n` +
-      `**What you brought**\n${list(strengths)}\n\n` +
-      `**Where to grow**\n${list(growthAreas)}\n\n` +
-      (passed
-        ? `**You're through to Round 1.** We'll send you a piece picked to test ` +
-          `one specific thing, and we'll tell you what that thing is and where ` +
-          `we have it today. You'll get ${policy.windowDays} days with the piece ` +
-          `to show movement on it — everything else still counts, but that one ` +
-          `thing is what the round turns on.\n\n` +
-          `Start it yourself whenever you're ready: the clock doesn't run until ` +
-          `you press the button, so take as long as you like getting there.`
-        : `**We're not taking this one through to Round 1.** That's our call on ` +
-          `what we saw here, not a verdict on you as a dancer — and everything ` +
-          `above is honest and worth having either way. Come back at us next ` +
-          `cycle; we'd like you to.`),
-  };
+  return (
+    `${content}\n\n` +
+    `**What you brought**\n${list(strengths)}\n\n` +
+    `**Where to grow**\n${list(growthAreas)}`
+  );
 }
 
 /**
@@ -1368,52 +1320,6 @@ function runOut(
   };
 }
 
-/**
- * Carrying someone into Round 2 as practice after a Round 1 fail.
- *
- * Writes the flag and nothing else — the result still goes out through
- * `sendResult`, so the two of them read the exact words before anything
- * reaches the dancer. Separate from sending on purpose: this changes what
- * Round 2 *is*, and that's a decision worth its own click.
- */
-export async function carryAsPractice(
-  env: Env,
-  discordId: string,
-  policy: DiamondsPolicy,
-): Promise<FlowResult> {
-  const record = await getRecord(env, discordId);
-  if (!record) {
-    return { ok: false, reason: `<@${discordId}> isn't registered for this audition.` };
-  }
-  if (record.practiceFrom !== undefined) {
-    return { ok: false, reason: `<@${discordId}>'s audition is already practice.` };
-  }
-
-  const settled = settleRound(record, 1, policy);
-  if (settled?.outcome !== "failed") {
-    return {
-      ok: false,
-      reason:
-        `This is for a Round 1 that didn't move. <@${discordId}>'s Round 1 ` +
-        `${settled ? `settled as **${settled.outcome}**` : "isn't settled yet"}, ` +
-        `so there's nothing to carry them out of.`,
-    };
-  }
-  if (roundOf(record, 1).resultSentAt) {
-    return {
-      ok: false,
-      reason:
-        `<@${discordId}> has already been told. Changing it now would be two ` +
-        `different endings to the same round — tell them yourself, and a ` +
-        `director can put them back on the list.`,
-    };
-  }
-
-  const carried: DiamondsRecord = { ...record, practiceFrom: 2 };
-  await putRecord(env, carried);
-  await refreshReviewCard(env, carried, 1, policy);
-  return { ok: true, record: carried };
-}
 
 /**
  * Whether this person is one of the two who judge Diamonds, and so exempt from
@@ -1479,6 +1385,7 @@ export async function runDiamondsSweep(
 ): Promise<{
   reminded: number;
   nudged: number;
+  /** Kept at 0: the sitting-on-a-piece nudge went with the plan reminder. */
   headsUp: number;
   /** On the list with no cover in — only reachable via `/diamonds add`. */
   round0: number;
@@ -1559,7 +1466,7 @@ export async function runDiamondsSweep(
           content:
             `⏰ **Round ${round} closes <t:${unix}:R>.** Submit with ` +
             `\`/diamonds submit link:<url>\` before then. If something's gone ` +
-            `wrong, you can request for an extension.`,
+            `wrong, you can request an extension from your panel.`,
         });
         current = withRound(current, round, { remindedAt: now.toISOString() });
         await putRecord(env, current);
@@ -1568,31 +1475,11 @@ export async function runDiamondsSweep(
         continue;
       }
 
-      // The "you said you'd start today" reminder used to go here, and it's
-      // gone. The estimate itself stays: `/diamonds roster` reads it so the two
-      // of you can see the review load coming, which is the thing it was always
-      // most useful for. What it no longer does is DM anybody — a date somebody
-      // volunteered isn't a commitment, and a bot that chases you about one
-      // turns a helpful guess into a thing you'd rather not have offered.
-
-      if (needsStartHeadsUp(current, round, policy.headsUpDays, now)) {
-        await sendDirectMessage(env, current.discordId, {
-          content:
-            `👋 **Round ${round}: your piece has been waiting ${policy.headsUpDays} ` +
-            `days.** No rush, just keep in mind you only have ${policy.runDays} ` +
-            `days — the ${policy.windowDays} days run from whenever you start.\n` +
-            `\`/diamonds start\` when you want it.` +
-            (ROUND_REVEAL[round] === "on-start"
-              ? `\n\nWorth knowing: starting is what shows you the piece, so ` +
-                `there's nothing to look at beforehand and nothing to gain by ` +
-                `waiting — everyone gets the same ${policy.windowDays} days with it.`
-              : ""),
-        });
-        current = withRound(current, round, { startHeadsUpAt: now.toISOString() });
-        await putRecord(env, current);
-        headsUp += 1;
-        spoke = true;
-      }
+      // Two messages used to sit here: "you said you'd start today", and "your
+      // piece has been waiting ten days". Both are gone. The 60-day clock
+      // reminds people on its own schedule and does it once; a bot that also
+      // chases you about a date you volunteered, and again about a piece you
+      // haven't got round to, is three messages for one fact.
     }
 
     // On the list with no cover in.
@@ -1604,11 +1491,12 @@ export async function runDiamondsSweep(
     if (!spoke && !quiet && needsRound0Nudge(current, policy.headsUpDays, now)) {
       await sendDirectMessage(env, current.discordId, {
         content:
-          `👋 **You're on the Diamonds list, and we haven't got a cover from you ` +
-          `yet.** A director put you on rather than you registering, so this may ` +
-          `be news: Round 0 is a video of your own choosing, and an existing one ` +
-          `from the last six months is fine.\n` +
-          `\`/diamonds submit link:<url>\` whenever you like.`,
+          `**Round 0 — we don't have your cover yet.**\n\n` +
+          `A director added you to the Diamonds list rather than you registering, ` +
+          `so this may be the first you've heard of it. Round 0 is a video of ` +
+          `your own choosing, and an existing one from the last six months is ` +
+          `fine.\n\n` +
+          `Submit with \`/diamonds submit link:<url>\`. Questions to a director.`,
       });
       current = withRound(current, 0, { startNudgedAt: now.toISOString() });
       await putRecord(env, current);
@@ -1640,14 +1528,13 @@ export async function runDiamondsSweep(
         const ends = Math.floor(new Date(runEndsAt(current, policy.runDays)!).getTime() / 1000);
         await sendDirectMessage(env, current.discordId, {
           content:
-            `⏳ **${left} days left on your audition.** All three rounds have to be ` +
-            `done by <t:${ends}:D> — that's the ${policy.runDays} days from when you ` +
-            `registered.\n` +
-            `There's still room: a round takes ${policy.windowDays} days and we turn ` +
-            `feedback round in ${policy.reviewMinDays}–${policy.reviewMaxDays}.\n` +
-            `If that isn't enough, say so to a director **before** the date rather ` +
-            `than after. They can put you back on afterwards, but it's a worse ` +
-            `conversation than this one.`,
+            `**${left} days left on your audition.**\n\n` +
+            `All three rounds need to be finished by <t:${ends}:D> — the ` +
+            `${policy.runDays} days run from when you registered. A round takes ` +
+            `${policy.windowDays} days and we return feedback within ` +
+            `${policy.reviewMinDays}–${policy.reviewMaxDays}, so there is still ` +
+            `room.\n\n` +
+            `Questions to a director.`,
         });
         current = { ...current, runWarnedAt: now.toISOString() };
         await putRecord(env, current);
@@ -1663,13 +1550,16 @@ export async function runDiamondsSweep(
 
       const told = await sendDirectMessage(env, current.discordId, {
         content:
-          `⌛ **Your audition has closed.** The ${policy.runDays} days you had to ` +
-          `get through all three rounds are up.\n\n` +
-          `This isn't a judgement on your dancing — it's a clock, and it exists so ` +
-          `a Round 1 read and a Round 2 months later aren't being compared as if ` +
-          `they were the same week. **If something got in the way, tell a ` +
-          `director:** they can put you straight back on the list, and that's much ` +
-          `easier than it sounds.`,
+          `**Your audition has closed.**\n\n` +
+          `The ${policy.runDays} days for all three rounds are up, so this ` +
+          `audition is finished without a result.\n\n` +
+          `**You can audition again from <t:${Math.floor(
+            new Date(
+              retryBlockedUntil({ ...current, expiredAt: now.toISOString() }, policy.retryMonths) ??
+                now.toISOString(),
+            ).getTime() / 1000,
+          )}:D>.** Registering then starts a new audition from Round 0.\n\n` +
+          `Questions to a director.`,
       });
       await alertDirectors(
         env,
@@ -1715,13 +1605,13 @@ export async function runDiamondsSweep(
         // DMs a way to stay a Diamond for ever.
         const told = await sendDirectMessage(env, current.discordId, {
           content:
-            `💎 **Your Diamonds membership has ended.** It ran to ` +
-            `<t:${ranTo}:D>, and a ` +
-            `re-audition is what renews it — so the role has come off.\n\n` +
-            `This isn't a judgement on your dancing and it isn't a door closing: ` +
-            `register again whenever you want and you go through the rounds like ` +
-            `anyone else. If you think this is wrong, or something got in the way, ` +
-            `tell a director — they can put it right.`,
+            `**Your Diamonds membership has ended.**\n\n` +
+            `It ran to <t:${ranTo}:D>. Membership is renewed by re-auditioning, ` +
+            `so the role has come off.\n\n` +
+            `**You can re-audition whenever you like** — register and you go ` +
+            `through the three rounds like anyone else, and passing puts you ` +
+            `back on with a new date.\n\n` +
+            `Questions to a director.`,
         });
 
         await alertDirectors(
@@ -1827,12 +1717,12 @@ function renewalNotice(
     const until = Math.floor(new Date(blockedUntil).getTime() / 1000);
     return {
       content:
-        `⚠️ **Your Diamonds membership runs to ${date}, and you can't re-audition ` +
-        `before <t:${until}:D>.**\n\n` +
-        `That's the wait after dropping out, and it runs past your renewal — so ` +
-        `on current rules the role comes off on ${date}. **Talk to a director.** ` +
-        `They can put you back on the list inside the wait, and they would rather ` +
-        `do that than lose you to a calendar.`,
+        `**Your Diamonds membership runs to ${date}.**\n\n` +
+        `You can't re-audition before <t:${until}:D> — that's the ` +
+        `${policy.retryMonths}-month wait after an audition that didn't go ` +
+        `through, and it runs past your renewal date. On current rules the role ` +
+        `comes off on ${date}.\n\n` +
+        `Questions to a director.`,
     };
   }
   const needed = policy.reviewMaxDays + policy.windowDays + policy.reviewMaxDays + policy.windowDays;
@@ -1841,34 +1731,33 @@ function renewalNotice(
   if (daysLeft > (policy.noticeDays[1] ?? 30)) {
     return {
       content:
-        `💎 **Your Diamonds membership runs to ${date}** — about two months off.\n` +
-        `Re-auditioning before then renews it, and going early is worth more: ` +
-        `your next date is set by the half of the year you re-audition in, so the ` +
-        `sooner you go the longer the next term. Nothing to do today beyond ` +
-        `knowing the date.`,
+        `**Your Diamonds membership runs to ${date}.**\n\n` +
+        `Membership is renewed by re-auditioning, and passing sets a new date. ` +
+        `Re-auditioning earlier in the half of the year gives you a longer next ` +
+        `term, so there's an advantage to going sooner.\n\n` +
+        `Nothing to do today. Questions to a director.`,
     };
   }
 
   if (daysLeft > final) {
     return {
       content:
-        `💎 **A month to ${date}**, when your Diamonds membership is up for ` +
-        `renewal.\n` +
-        `A re-audition needs about ${needed} days end to end — the rounds, the ` +
-        `windows and our turnaround — so this is the point to pick the week ` +
-        `you'll start rather than the day. \`/diamonds status\` has where you ` +
-        `stand.`,
+        `**A month to ${date}**, when your Diamonds membership is up for ` +
+        `renewal.\n\n` +
+        `A re-audition takes about ${needed} days end to end — three rounds, ` +
+        `two windows and our turnaround — so this is the point to start ` +
+        `thinking about which week. \`/diamonds status\` has where you stand.\n\n` +
+        `Questions to a director.`,
     };
   }
 
   return {
     content:
-      `⚠️ **${daysLeft} days to ${date}.** That's about as long as a re-audition ` +
-      `takes, so if you want to renew this term it needs to start now.\n\n` +
-      `If you haven't re-auditioned by ${date} you come off the Diamonds role — ` +
-      `not a judgement, just how membership works, and you're welcome back at the ` +
-      `next audition. If something's in the way, tell a director rather than ` +
-      `letting the date pass: they can move it.`,
+      `**${daysLeft} days to ${date}.**\n\n` +
+      `That's about as long as a re-audition takes, so renewing this term means ` +
+      `starting now. If you haven't re-auditioned by ${date}, the Diamonds role ` +
+      `comes off and you're welcome to audition again whenever you like.\n\n` +
+      `Questions to a director.`,
   };
 }
 
@@ -2125,6 +2014,23 @@ export async function sendResult(
     };
   }
 
+  // **No result goes out without written feedback.** The scores don't reach the
+  // dancer at all now, so the note is the entire body of the message — without
+  // one this would send a bare verdict, which is the thing the whole shape of
+  // these messages exists to avoid. Refused rather than padded: a generated
+  // sentence standing in for a director's reading would be worse than waiting.
+  const written = composeFeedback(roundOf(record, round), directorIds).trim();
+  if (!written) {
+    return {
+      ok: false,
+      reason:
+        `Nothing written for Round ${round} yet, and the result **is** the ` +
+        `feedback — scores don't go to the dancer, so there'd be no message here ` +
+        `beyond the verdict. Write it with \`/diamonds feedback\` or the **Note** ` +
+        `button, then send.`,
+    };
+  }
+
   const at = now.toISOString();
 
   // Membership is written *before* the message goes, so the message can say the
@@ -2176,15 +2082,8 @@ export async function sendResult(
       : record;
 
   const reached = await sendDirectMessage(env, discordId, {
-    content: resultMessage(
-      promoted,
-      round,
-      settled,
-      counted,
-      composeFeedback(roundOf(promoted, round), directorIds),
-      ctx,
-      policy,
-    ),
+    content: resultMessage(promoted, round, settled, written, ctx, now),
+    components: resultComponents(promoted, round, settled),
   });
   if (!reached) {
     return {

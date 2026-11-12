@@ -598,7 +598,6 @@ the fix belongs to a director.
 
 ```
 /diamonds register   put your name down AND send your Round 0 cover — one step
-/diamonds plan       say when you'll start the round you're in, and get reminded
 /diamonds start      the panel, and the [Start time now] button
 /diamonds submit     hand in a link, for the round you're in
 /diamonds status     where you are, what's next, who you're waiting on
@@ -631,32 +630,6 @@ the process has already failed.
 project has been done decides whether a *pass can place someone*, which is a
 question at the end rather than the start — and asking it here would collect a
 self-reported answer no decision was ever going to be made on.
-
-### The estimate, and why it's per round
-
-`register` asks roughly when they'll send Round 0; `/diamonds plan` says the same
-for each round after that. Stored on the round, not on the person, because each
-round is a separate decision about when to find three days — and because an
-estimate guessed in November about a round they'll reach in December isn't a
-plan, it's a mood.
-
-**Nothing is ever refused on the strength of it**, and every message that
-mentions it says so. What it buys is two things:
-
-- A reminder on the morning they picked. This is the one part of the process
-  nobody schedules for them: no rehearsal in the diary, no phase opening on a
-  Monday, nothing but a close date eight weeks out. A day someone chose
-  themselves is much easier to hit than no day at all.
-- Directors can see the review stream coming instead of discovering it.
-
-The date itself *is* validated, though — not to hold anyone to it, but because a
-plan the bot can't honour is worse than no plan. A day inside Round 1's working
-gap, or past the last possible start, or already gone, is refused with the real
-date instead. Otherwise they'd be waiting for a reminder on a day they were
-never able to start.
-
-Moving the date clears the reminder marker, so the reminder moves with it rather
-than being silently spent.
 
 `config` and `schedule` are the only two that run while the flag is off, because
 reading the timeline and fixing it are *how you decide* whether to turn the flag

@@ -73,12 +73,10 @@ import {
   getRecord,
   answerAsk,
   askForDays,
-  carryAsPractice,
   grantMembership,
   takePractice,
   panelContext,
   noteRound,
-  planStart,
   register,
   scoreRound,
   sendResult,
@@ -373,27 +371,6 @@ async function runSubcommand(
       : roundPanel(record, live.round, ctx, now);
   }
 
-  if (sub === "plan") {
-    const live = await liveRound(env, userId, now);
-    if (!live.ok) return { content: `❌ ${live.reason}` };
-    const result = await planStart(
-      env,
-      userId,
-      live.round,
-      option(interaction, "plan", "date"),
-      timeline,
-      policy,
-      now,
-    );
-    return said(
-      result,
-      `📌 **Noted — Round ${live.round} around ${option(interaction, "plan", "date")}.** ` +
-        `I'll remind you that morning. Not a commitment: change it with ` +
-        `\`/diamonds plan\` whenever, as often as you like. It's just easier to ` +
-        `hit a day you picked than one nobody picked.`,
-    );
-  }
-
   if (sub === "submit") {
     const live = await liveRound(env, userId, now);
     if (!live.ok) return { content: `❌ ${live.reason}` };
@@ -610,8 +587,6 @@ export async function handleDiamondsComponent(
     "quit",
     "submit",
     "submit-save",
-    "plan",
-    "plan-save",
     "leave",
     "practice",
     "ask",
@@ -765,16 +740,16 @@ export async function handleDiamondsComponent(
   // these read the record inline to work out which round they're in — the same
   // derivation the slash commands do, for the same reason: nobody should have
   // to know they're in Round 1 to submit.
-  if (action === "submit" || action === "plan") {
+  if (action === "submit") {
     const now = new Date();
     const live = await liveRound(env, userId, now);
     if (!live.ok) return json(ephemeral(`❌ ${live.reason}`));
-    return json(action === "submit" ? submitModal(live.round) : planModal(live.round));
+    return json(submitModal(live.round));
   }
 
-  if (action === "submit-save" || action === "plan-save") {
+  if (action === "submit-save") {
     // Replaces the panel it was opened from, so the panel always shows what is
-    // true now — submitted, or the day they just picked.
+    // true now.
     ctx.waitUntil(
       (async () => {
         let payload: MessagePayload;
@@ -785,26 +760,15 @@ export async function handleDiamondsComponent(
           if (!live.ok) {
             payload = { content: `❌ ${live.reason}`, components: [] };
           } else {
-            const result =
-              action === "submit-save"
-                ? await submit(
-                    env,
-                    userId,
-                    live.round,
-                    modalValue(interaction, SUBMIT_LINK),
-                    timeline,
-                    policy,
-                    now,
-                  )
-                : await planStart(
-                    env,
-                    userId,
-                    live.round,
-                    modalValue(interaction, PLAN_DATE),
-                    timeline,
-                    policy,
-                    now,
-                  );
+            const result = await submit(
+              env,
+              userId,
+              live.round,
+              modalValue(interaction, SUBMIT_LINK),
+              timeline,
+              policy,
+              now,
+            );
             payload = result.ok
               ? roundPanel(result.record, live.round, panel, now)
               : { content: `❌ ${result.reason}` };
@@ -917,28 +881,8 @@ export async function handleDiamondsComponent(
     });
   }
 
-  if (action === "carry") {
-    const dancer = arg;
-    if (!/^\d{15,}$/.test(dancer)) return json(ephemeral("That button has gone stale."));
-
-    ctx.waitUntil(
-      (async () => {
-        const policy = await getDiamondsPolicy(env);
-        const result = await carryAsPractice(env, dancer, policy);
-        await editOriginalResponse(env, interaction.application_id, interaction.token, {
-          content: result.ok
-            ? `📝 **<@${dancer}>'s Round 2 is practice now.** The Round 1 result ` +
-              `hasn't gone anywhere yet — press **Read back & send** and you'll ` +
-              `see the version that says both things.`
-            : `❌ ${result.reason}`,
-        });
-      })(),
-    );
-    return json({ type: InteractionResponseType.DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE, data: { flags: 64 } });
-  }
-
-  // Taking the practice offer on a Round 0 fail. Replaces the offer with their
-  // Round 1 panel, so the next thing they see is the thing they just asked for.
+  // Taking the practice offer on a failed round. Replaces the offer with their
+  // panel for the next round, so the next thing they see is what they asked for.
   if (action === "practice") {
     ctx.waitUntil(
       (async () => {
@@ -950,16 +894,19 @@ export async function handleDiamondsComponent(
           if (!result.ok) {
             payload = { content: `❌ ${result.reason}`, components: [] };
           } else {
-            // Their Round 1 panel, with a line above it. One message rather
-            // than two: the panel is the answer to "what happens now", and a
-            // confirmation beside it would be the same news twice.
-            const panelNow = roundPanel(result.record, 1, panel, now);
+            // The panel for whichever round practice starts at, with a line
+            // above it. One message rather than two: the panel is the answer to
+            // "what happens now", and a confirmation beside it is the same news
+            // twice.
+            const from = result.record.practiceFrom ?? 1;
+            const panelNow = roundPanel(result.record, from, panel, now);
             payload = {
               ...panelNow,
               content:
-                `📝 **You're down for Rounds 1 and 2 as practice.** Round 0's ` +
-                `result doesn't change, and nothing from here is judged.\n\n` +
-                `${panelNow.content ?? ""}`,
+                `**You're down for ${
+                  from === 1 ? "Rounds 1 and 2" : "Round 2"
+                } as practice.** The result you've had doesn't change, and ` +
+                `nothing from here is judged.\n\n${panelNow.content ?? ""}`,
             };
           }
         } catch (err) {
@@ -1191,14 +1138,23 @@ async function resultPreview(
     };
   }
 
-  const notes = composeFeedback(roundOf(record, round), await getDirectorIds(env));
+  const notes = composeFeedback(roundOf(record, round), await getDirectorIds(env)).trim();
+  // Refused rather than previewed. `sendResult` won't send it either, and a
+  // read-back of a message that can't go out is a button that does nothing.
+  if (!notes) {
+    return {
+      content:
+        `❌ **Nothing written for Round ${round} yet.** The result *is* the ` +
+        `feedback — the scores don't go to the dancer — so there's no message to ` +
+        `read back until one of you has written something. Use the **Note** ` +
+        `button on the card, or \`/diamonds feedback\`.`,
+    };
+  }
+
   return {
     content:
       `**This is what <@${dancer}> will receive. Nothing has been sent yet.**` +
-      (notes
-        ? ""
-        : `\n*No director has written anything — write a note first if you meant to.*`) +
-      `\n\n${resultMessage(record, round, settled, counted, notes, ctx, policy)}`,
+      `\n\n${resultMessage(record, round, settled, notes, ctx, new Date())}`,
     components: [
       {
         type: ComponentType.ACTION_ROW,
@@ -1286,7 +1242,6 @@ const SCORE_PREFIX = "score-";
  * is a reason to think twice rather than a reason to split it.
  */
 const SUBMIT_LINK = "submit-link";
-const PLAN_DATE = "plan-date";
 const ASK_DAYS = "ask-days";
 const ASK_REASON = "ask-reason";
 const ASK_NOTE = "ask-note";
@@ -1395,32 +1350,6 @@ function submitModal(round: Round): unknown {
               placeholder: "A link anyone can open — Drive, YouTube, anything",
               required: true,
               max_length: 400,
-            },
-          ],
-        },
-      ],
-    },
-  };
-}
-
-function planModal(round: Round): unknown {
-  return {
-    type: InteractionResponseType.MODAL,
-    data: {
-      custom_id: diamondsCustomId("plan-save", "me"),
-      title: `Round ${round} — when you'll start`,
-      components: [
-        {
-          type: ComponentType.ACTION_ROW,
-          components: [
-            {
-              type: ComponentType.TEXT_INPUT,
-              custom_id: PLAN_DATE,
-              style: TextInputStyle.SHORT,
-              label: "Roughly which day? YYYY-MM-DD",
-              placeholder: "An estimate — change it as often as you like",
-              required: true,
-              max_length: 10,
             },
           ],
         },

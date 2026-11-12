@@ -369,19 +369,6 @@ export const DIAMONDS_COMMAND = {
     },
     {
       type: ApplicationCommandOptionType.SUB_COMMAND,
-      name: "plan",
-      description: "Say roughly when you'll start the round you're in — the directors see it",
-      options: [
-        {
-          type: ApplicationCommandOptionType.STRING,
-          name: "date",
-          description: "YYYY-MM-DD — change it whenever you like",
-          required: true,
-        },
-      ],
-    },
-    {
-      type: ApplicationCommandOptionType.SUB_COMMAND,
       name: "status",
       description: "Where you stand, and what happens next",
     },

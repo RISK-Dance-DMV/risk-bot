@@ -1,13 +1,14 @@
 # Every message, as text you can edit
 
+Current as of the consistency pass. **M1 and M3 are your wording** — they're in
+the code now. Numbers are unchanged from the last version so your references
+still work, which is why there's no M2: it was removed rather than renumbered.
+
 **How to use this.** Change the words inside the code blocks. Leave the
 `{tokens}` alone — they're filled in at send time, and renaming one breaks it.
 When you're done, tell me and I'll put the new wording into the code.
 
-Each one says when it fires and who sees it. `\n` isn't needed: a blank line in
-the block is a blank line in Discord.
-
-**Tokens used below**
+**Tokens**
 
 | Token | Becomes |
 | --- | --- |
@@ -18,17 +19,17 @@ the block is a blank line in Discord.
 | `{run}` | 60 — the days for all three rounds |
 | `{review}` | 1–5 — the turnaround range |
 | `{needed}` | 16 — the process end to end |
-| `{date}` `{closes}` `{ends}` | a date Discord renders in the reader's own timezone |
+| `{months}` | 6 — the retry wait |
+| `{date}` `{closes}` `{ends}` `{until}` | a date Discord renders in the reader's own timezone |
 | `{note}` `{reason}` | something a director or dancer wrote |
 
-Panels aren't in here — they're assembled from parts and change with state. Ask
-and I'll pull those out too.
+A blank line in a block is a blank line in Discord.
 
 ---
 
 ## To a dancer, on its own schedule
 
-The daily sweep. **At most one per person per day**, first match wins.
+The daily sweep. **One per person per morning**, first match wins.
 
 ### M1 · Their open window shuts tomorrow
 
@@ -36,27 +37,27 @@ The daily sweep. **At most one per person per day**, first match wins.
 ⏰ **Round {round} closes {closes}.** Submit with `/diamonds submit link:<url>` before then. If something's gone wrong, you can request for an extension.
 ```
 
-### M2 · ~~The day they said they'd start~~ — removed
+### M2 · removed
 
-Gone from the code. `/diamonds plan` still records the date and `/diamonds
-roster` still shows it to the directors, so the estimate keeps the one job it
-was best at; it just doesn't DM anybody about it any more.
+The "you said you'd start today" reminder — and then `/diamonds plan` with it.
+The reminders across the 60 days cover what it was for, and the roster now shows
+each person's **days left** where their guessed date used to be, which is the
+thing you actually wanted from it.
 
 ### M3 · A piece has sat unstarted for 10 days
 
 ```
-👋 **Round {round}: your piece has been waiting {days} days.** No rush, just keep in mind you only have 60 days — the {window} days run from whenever you start.
+👋 **Round {round}: your piece has been waiting {days} days.** No rush, just keep in mind you only have {run} days — the {window} days run from whenever you start.
 `/diamonds start` when you want it.
 
 Worth knowing: starting is what shows you the piece, so there's nothing to look at beforehand and nothing to gain by waiting — everyone gets the same {window} days with it.
 ```
 
-*(The last paragraph only appears for rounds where the piece is hidden until
-start, which is 1 and 2.)*
+*(Last paragraph only for rounds where the piece is hidden until start — 1 and 2.)*
 
 ### M4 · On the list 10 days with no cover
 
-Only reachable through `/diamonds add` — registering is sending the cover.
+Only reachable through `/diamonds add`, since registering is sending the cover.
 
 ```
 👋 **You're on the Diamonds list, and we haven't got a cover from you yet.** A director put you on rather than you registering, so this may be news: Round 0 is a video of your own choosing, and an existing one from the last six months is fine.
@@ -91,7 +92,7 @@ This isn't a judgement on your dancing and it isn't a door closing: register aga
 
 ### M8 · The renewal ladder
 
-Three rungs, each once, most urgent only. Silent while a re-audition is live.
+Each rung once, most urgent only, silent while a re-audition is live.
 
 **M8a — 60 days out**
 
@@ -115,8 +116,7 @@ A re-audition needs about {needed} days end to end — the rounds, the windows a
 If you haven't re-auditioned by {date} you come off the Diamonds role — not a judgement, just how membership works, and you're welcome back at the next audition. If something's in the way, tell a director rather than letting the date pass: they can move it.
 ```
 
-**M8d — replaces all three** when their six-month wait outruns their date. Never
-tells them to re-audition, because they can't.
+**M8d — replaces all three** when their six-month wait outruns their date.
 
 ```
 ⚠️ **Your Diamonds membership runs to {date}, and you can't re-audition before {until}.**
@@ -128,8 +128,8 @@ That's the wait after dropping out, and it runs past your renewal — so on curr
 
 ### M9 · Round 0 passed
 
-Held until the feedback is written *and* the Round 1 piece is up, so this is one
-message with the Start button on it.
+Held until the feedback is written **and** the Round 1 piece is up, so it's one
+message with the real Start button on it.
 
 ```
 💎 **Round 0: you're through to Round 1.** Nicely done.
@@ -142,13 +142,14 @@ message with the Start button on it.
 No hurry: read the above properly first, and press it when you've got {window} days you're happy to spend.
 ```
 
-`{start warning}` is M9a, shared with every start button:
+**M9a — `{start warning}`**, shared with every start button, so editing it
+changes the warning everywhere:
 
 ```
 Pressing this shows you your piece **and starts your clock at the same time.** From that moment you have {window} days to learn it, record it and submit. There's no way to un-press it.
 ```
 
-`{document}` is M9b, the feedback itself:
+**M9b — `{document}`**, the written feedback:
 
 ```
 **Your Diamonds feedback**
@@ -180,13 +181,13 @@ Everything at once, no button in front of it, plus the practice offer.
 **If you'd like to dance the rest of it anyway, you can.** Rounds 1 and 2 as practice: the same pieces, the same {window}-day windows, the same written feedback from both of us — and no verdict at the end, because this one is already decided. It costs you nothing and it doesn't change this result either way.
 ```
 
-The `{document}` here ends differently (M10a):
+**M10a — the document ends differently on a fail:**
 
 ```
 **We're not taking this one through to Round 1.** That's our call on what we saw here, not a verdict on you as a dancer — and everything above is honest and worth having either way. Come back at us next cycle; we'd like you to.
 ```
 
-### M11 · Round 1 result — advanced
+### M11 · Round 1 — advanced
 
 ```
 **Diamonds {year} — Round 1**
@@ -200,10 +201,10 @@ That's real movement on the thing we named, which is exactly what this round was
 Your final piece will arrive here. Everyone dances the same one, you get it privately when you start, and you'll have {window} days.
 ```
 
-*(Someone who was already at the bar and held it gets "You were already strong
-there and held it, which counts." instead of the "real movement" line.)*
+*(Someone already at the bar who held it gets "You were already strong there and
+held it, which counts." instead of the "real movement" line.)*
 
-### M12 · Round 1 result — not advanced
+### M12 · Round 1 — not advanced
 
 ```
 **Diamonds {year} — Round 1**
@@ -215,7 +216,7 @@ there and held it, which counts." instead of the "real movement" line.)*
 That's the one thing this round measured, and it didn't move enough to carry you forward. It isn't a verdict on you as a dancer and it isn't the end of anything — keep working on it, and audition again. We'd rather you did.
 ```
 
-### M13 · Round 1 result — carried on as practice
+### M13 · Round 1 — carried on as practice
 
 ```
 **Diamonds {year} — Round 1**
@@ -229,7 +230,7 @@ That's the one thing this round measured, and it didn't move enough to carry you
 Your piece will arrive here. If you'd rather stop, that's completely fine — tell a director.
 ```
 
-### M14 · Round 2 result — passed
+### M14 · Round 2 — passed
 
 ```
 **Diamonds {year} — Round 2**
@@ -245,7 +246,7 @@ Weighted: **{weighted}**
 **Your membership runs to {date}.** Diamonds is re-auditioned rather than permanent — re-audition before then and it renews, and going early in the half is worth a longer next term.
 ```
 
-### M15 · Round 2 result — failed
+### M15 · Round 2 — failed
 
 ```
 **Diamonds {year} — Round 2**
@@ -255,7 +256,7 @@ Weighted: **{weighted}**
 {the four scores}
 ```
 
-### M16 · Any practice round's result
+### M16 · Any practice round
 
 ```
 **Diamonds {year} — Round {round}, practice**
@@ -267,12 +268,12 @@ Weighted: **{weighted}**
 Your next piece will arrive here the same way.
 ```
 
-*(After Round 2 the last line becomes: "That's the end of the run. Nothing is
-recorded against you, and you can audition for real whenever you want to.")*
+*(After Round 2: "That's the end of the run. Nothing is recorded against you,
+and you can audition for real whenever you want to.")*
 
 ### M17 · A piece goes up
 
-The round panel, as a DM. Its "ready to start" state:
+The round panel as a DM, in its ready-to-start state:
 
 ```
 **Round {round} · Diamonds {year}**
@@ -281,6 +282,18 @@ The round panel, as a DM. Its "ready to start" state:
 {start warning}
 
 **No deadline on starting the window itself** — the piece keeps until you want it.
+```
+
+Plus **M17a**, the line underneath on every panel where the next move is theirs:
+
+```
+⏳ **All three rounds by {ends}** — {run} days from when you registered, and **{left}** left. The whole thing takes about {needed} days of actual process, so there's room; if you need more, ask a director before the date rather than after.
+```
+
+And **M17b**, which replaces it once the clock has gone:
+
+```
+⌛ **Your {run} days ran out {ends}.** Talk to a director — they can put you back on the list with a fresh {run} days.
 ```
 
 ### M18 · An extension granted
@@ -306,18 +319,25 @@ If that lands badly or something has changed, say so to a director rather than l
 Diamonds is re-auditioned rather than permanent — re-audition before then and it renews, and going early in the half is worth a longer next term. You'll get reminders well ahead of the date; there's nothing to do now.
 ```
 
+### M21 · `/diamonds add` — somebody a director put on who owes a cover
+
+The Round 0 panel. **No plan button on it any more**: registering is the cover,
+so there's nothing left to schedule.
+
+```
+**Round 0 · Diamonds {year}**
+📼 **You're on the list, and we need a cover from you.** A director put you on rather than you registering, so this may be news.
+
+Your own choice of piece, and an existing one from the last six months is fine — you don't have to film anything new. It's judged as a yes or a no, not scored: does this belong in the process. Either way you get written feedback.
+The button below, or `/diamonds submit link:<url>`.
+```
+
 ## To a dancer, answering them
 
-### M21 · After **Ask for more time**
+### M22 · After **Ask for more time**
 
 ```
 ⏳ **Asked.** The directors have it, and they'll answer either way. **Your deadline is still running** until they do, so keep working if you can — a granted extension on a submitted round is a much better problem than the other way round.
-```
-
-### M22 · After **Dance the rest as practice**
-
-```
-📝 **You're down for Rounds 1 and 2 as practice.** Round 0's result doesn't change, and nothing from here is judged.
 ```
 
 ### M23 · The withdrawal warning
@@ -334,6 +354,17 @@ Diamonds is re-auditioned rather than permanent — re-audition before then and 
 You're off the list, and the wait has started. A director can put you back on inside it if your case warrants it — ask them rather than waiting it out in silence.
 ```
 
+### M24a · After **Dance the rest as practice**
+
+```
+📝 **You're down for Rounds 1 and 2 as practice.** Round 0's result doesn't change, and nothing from here is judged.
+```
+
+### M24b, M24c · removed
+
+The Round 0 plan refusal and the plan invitation, both gone with
+`/diamonds plan`.
+
 ## To the directors
 
 ### M25 · A dancer asks for days — in #audition-review
@@ -345,7 +376,7 @@ You're off the list, and the wait has started. A director can put you back on in
 Their deadline is still running while this sits here, so it's worth answering today either way. A denial needs a reason — they'll be told what you write.
 ```
 
-Once answered it becomes (M25a):
+**M25a — once answered**, in place of the above:
 
 ```
 ✅ **{dancer} asked for {days} more days** on their Round {round} window ({window} days).
@@ -369,7 +400,7 @@ Granted by {director} {when}.
 
 ### M28 · Ballots owed past the promised turnaround
 
-The only message that repeats. Daily until the list empties.
+The only message that repeats — daily until the list empties.
 
 ```
 ⏰ **{count} waiting on a ballot longer than the {review} days we promise:**
@@ -389,3 +420,13 @@ Their {run} days keep running while they wait, so this is the thing most likely 
 ```
 ⚠️ Couldn't DM them, so they've not been told.
 ```
+
+---
+
+## Gone since the last version
+
+- **M2**, the planned-start reminder.
+- **The last-chance nudge** — it counted back from the close date, which no
+  longer exists.
+- **The unopened-feedback nudge** — there's no button between the pass and the
+  piece any more, so there's nothing to leave unopened.

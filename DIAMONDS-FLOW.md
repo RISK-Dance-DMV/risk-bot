@@ -528,25 +528,25 @@ In order:
 
 Withdrawing silences 1–5 and leaves 6 and 7 running.
 
-**There's no "you said you'd start today" message.** There was, and it went:
-`/diamonds plan` still records the date and the roster still shows it to the
-directors, which is what it was always most useful for. A date somebody
-volunteered isn't a commitment, and chasing them about one turns a helpful guess
-into a thing they'd rather not have offered.
+**Nothing asks you to pick a start date, and nothing reminds you of one.** There
+was a `/diamonds plan` for that, and it went: the reminders across the 60 days
+cover what it was for, and `/diamonds roster` now shows each person's **days
+left** where their guessed date used to be — which is the thing the roster was
+always wanted for. A date somebody volunteered was never what told you when to
+expect them.
 
 Separately, once a morning, the directors get a list of ballots they owe past
 the promised turnaround — the only message here that repeats.
 
 ## Command reference
 
-**Dancers** (six, though the buttons cover five of them):
+**Dancers** (five, though the buttons cover four of them):
 
 | | |
 | --- | --- |
 | `/diamonds register cover: [practice:]` | Your name down **and** your Round 0 cover. Also how you start again. |
 | `/diamonds start` | Get your piece; the clock starts. |
 | `/diamonds submit link:` | Submit for whichever round you're in. |
-| `/diamonds plan date:` | Say roughly when you'll start. The directors see it on the roster; nothing reminds you. |
 | `/diamonds status` | Where you stand, your date, and which audition this is if it isn't your first. |
 | `/diamonds withdraw` | Warns, then needs a button. Costs six months. |
 | *(button only)* **Ask for more time** | Days + what happened, answered by a director in #audition-review. |

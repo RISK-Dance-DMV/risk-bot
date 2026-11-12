@@ -28,6 +28,7 @@ import {
   runDaysLeft,
   runEndsAt,
   targetToBeat,
+  waitEndsAt,
   startWarning,
   visiblePiece,
   windowClosesAt,
@@ -66,12 +67,9 @@ export type DiamondsAction =
   | "preview"
   | "send"
   /** Round 1 didn't move: carry them into Round 2 as practice instead. */
-  | "carry"
   /** The dancer's own four, so `register` is the only thing anyone types. */
   | "submit"
   | "submit-save"
-  | "plan"
-  | "plan-save"
   | "leave"
   /** A dancer taking the practice offer after a Round 0 fail. */
   | "practice"
@@ -94,11 +92,8 @@ const ACTIONS: DiamondsAction[] = [
   "note-save",
   "preview",
   "send",
-  "carry",
   "submit",
   "submit-save",
-  "plan",
-  "plan-save",
   "leave",
   "practice",
   "ask",
@@ -181,9 +176,6 @@ export interface PanelContext {
   /** Only the roster uses this, and only to say what's stuck on one ballot. */
   minScores: number;
   retryMonths: number;
-  /** Round 1's panel quotes the number they have to reach, so it needs both. */
-  bar: number;
-  requiredSteps: number;
   /** Days for the whole run, counted from registration. */
   runDays: number;
 }
@@ -215,12 +207,15 @@ export interface PanelContext {
 export function feedbackArrived(document: string, windowDays: number): MessagePayload {
   return {
     content:
-      `💎 **Round 0: you're through to Round 1.** Nicely done.\n\n` +
+      `**Round 0 — your result**\n\n` +
+      `Thank you for your submission. **You're through to Round 1.**\n\n` +
       `${document}\n\n` +
-      `**Your Round 1 piece is ready when you are.**\n` +
+      `**Round 1 is a piece we've picked for you**, chosen to look at one ` +
+      `specific thing. We'll tell you what that thing is when it goes up, and ` +
+      `we'll look at the same thing again afterwards.\n` +
       `${startWarning(ROUND_REVEAL[1], windowDays)}\n\n` +
-      `No hurry: read the above properly first, and press it when you've got ` +
-      `${windowDays} days you're happy to spend.`,
+      `Read the above properly first, and press it when you've got ` +
+      `${windowDays} days to give it. Questions to a director.`,
     components: row(BUTTON.start(1)),
   };
 }
@@ -241,14 +236,15 @@ export function feedbackArrived(document: string, windowDays: number): MessagePa
 export function feedbackRefused(document: string, windowDays: number): MessagePayload {
   return {
     content:
-      `**Round 0: we're not taking this one through to Round 1.** That's our ` +
-      `call on what we saw, not a verdict on you as a dancer.\n\n` +
+      `**Round 0 — your result**\n\n` +
+      `Thank you for your submission. We've decided not to take this one ` +
+      `through to Round 1.\n\n` +
       `${document}\n\n` +
-      `**If you'd like to dance the rest of it anyway, you can.** Rounds 1 and 2 ` +
-      `as practice: the same pieces, the same ${windowDays}-day windows, the same ` +
-      `written feedback from both of us — and no verdict at the end, because this ` +
-      `one is already decided. It costs you nothing and it doesn't change this ` +
-      `result either way.`,
+      `**If you'd like to dance Rounds 1 and 2 as practice**, the button below ` +
+      `sets that up: the same pieces, the same ${windowDays}-day windows, the ` +
+      `same written feedback, and no verdict at the end. It costs nothing and ` +
+      `doesn't change this result.\n\n` +
+      `Questions to a director.`,
     components: [
       {
         type: ComponentType.ACTION_ROW,
@@ -274,8 +270,7 @@ export function feedbackRefused(document: string, windowDays: number): MessagePa
  * for practice should not have to infer it from the absence of a verdict.
  */
 function practiceTag(record: DiamondsRecord, round: Round): string {
-  if (!isPractice(record, round)) return "";
-  return record.practiceFrom === 0 ? " · practice" : " · practice from here";
+  return isPractice(record, round) ? " · practice" : "";
 }
 
 /**
@@ -308,12 +303,6 @@ const BUTTON = {
     style: first ? ButtonStyle.PRIMARY : ButtonStyle.SECONDARY,
     label: first ? "Submit my cover" : "Replace it",
     custom_id: diamondsCustomId("submit", "me"),
-  }),
-  plan: (set: boolean) => ({
-    type: ComponentType.BUTTON,
-    style: ButtonStyle.SECONDARY,
-    label: set ? "Change my day" : "Say when I'll start",
-    custom_id: diamondsCustomId("plan", "me"),
   }),
   leave: {
     type: ComponentType.BUTTON,
@@ -392,9 +381,11 @@ function roundZeroPanel(
       `not scored: does this belong in the process. Either way you get written ` +
       `feedback.\n` +
       `The button below, or \`/diamonds submit link:<url>\`.\n\n` +
-      runLine(record, ctx, now) +
-      planLine(entry),
-    components: row(BUTTON.cover(true), BUTTON.plan(!!entry.plannedStartAt)),
+      runLine(record, ctx, now),
+    // No plan button. Planning when you'll start a round is a real question for
+    // Rounds 1 and 2, which have windows; Round 0 is one action with nothing to
+    // schedule, and offering to diary it would imply there's more to it.
+    components: row(BUTTON.cover(true)),
   };
 }
 
@@ -465,44 +456,25 @@ function askLine(record: DiamondsRecord): string {
   );
 }
 
-function planLine(entry: RoundRecord): string {
-  if (entry.plannedStartAt) {
-    return (
-      `\n\n📌 **You said around ${entry.plannedStartAt}.** Move it whenever with ` +
-      `\`/diamonds plan date:YYYY-MM-DD\` — it was only ever an estimate, and ` +
-      `nothing happens if it slips.`
-    );
-  }
-  return (
-    `\n\n📌 **Pick a day you'll start and tell us** — the button below, or ` +
-    `\`/diamonds plan date:YYYY-MM-DD\`. Nothing is held against it and nothing ` +
-    `chases you about it; it's so the directors can see when to expect you, and ` +
-    `so you've named a day rather than meaning to name one.`
-  );
-}
 
-function targetLine(record: DiamondsRecord, round: Round, ctx: PanelContext): string {
+/**
+ * The one thing Round 1 is watching, named and not numbered.
+ *
+ * This used to quote both the starting read and the number to beat, on the
+ * argument that a delta you can't see the start of is a verdict rather than a
+ * measurement. That argument was about the directors' problem, not the
+ * dancer's: the number exists so two people reach the same reading, and handing
+ * it over turns the round into a figure to chase instead of a thing to fix.
+ *
+ * So they get the thing, in words. We keep the number.
+ */
+function targetLine(record: DiamondsRecord, round: Round): string {
   if (round !== 1 || !record.target) return "";
-  // The number they have to reach, said out loud. The rule behind it — half the
-  // distance to the bar, capped at the bar — is not something anyone should have
-  // to reconstruct from a doc to know what this round is asking of them.
-  const before =
-    record.targetBefore === undefined
-      ? ""
-      : ` We have it at **${record.targetBefore.toFixed(1)}/10** as of the day ` +
-        `this piece went up, and that number is now fixed — it was set before ` +
-        `anyone had seen what you'd do with it, which is the only way it's worth ` +
-        `anything.\n**To advance, we need to read it at ` +
-        `${targetToBeat(record.targetBefore, ctx.bar, ctx.requiredSteps).toFixed(2)}/10 ` +
-        `or better.**` +
-        (record.targetBefore >= ctx.bar
-          ? ` It's already at the bar, so the ask is that it's still there.`
-          : ` That's half the distance to the bar — the further off it is, the ` +
-            `more of that distance we want to see closed.`);
   return (
-    `\n**What this round is looking at:** ${record.target}.${before}\n` +
-    `Round 2 scores the four dimensions against the bar; this round doesn't. It ` +
-    `scores that one thing against where it started.`
+    `\n**What this round is looking at:** ${record.target}.\n` +
+    `We noted where that sat before this piece went up, and we'll look at the ` +
+    `same thing again afterwards. Everything else still counts — that one thing ` +
+    `is what the round turns on.`
   );
 }
 
@@ -558,7 +530,7 @@ export function roundPanel(
         `**Your piece:**\n${piece}\n\n` +
         `Submit before your window closes — the button, or ` +
         `\`/diamonds submit link:<url>\`.` +
-        targetLine(record, round, ctx) +
+        targetLine(record, round) +
         askLine(record),
       // Asking sits next to submitting rather than somewhere else, because the
       // moment someone realises they need more time is the moment they are
@@ -588,15 +560,16 @@ export function roundPanel(
 
   return {
     content:
-      `${head}\n🎬 **Your piece is ready.** Nobody needs to be here for this — ` +
-      `start whenever you're ready to give it ${ctx.windowDays} days.\n\n` +
-      `${startWarning(ROUND_REVEAL[round], ctx.windowDays)}\n\n` +
-      `**No deadline on starting the window itself** — the piece keeps until you ` +
-      `want it.` +
-      runLine(record, ctx, now) +
-      targetLine(record, round, ctx) +
-      planLine(entry),
-    components: row(BUTTON.start(round), BUTTON.plan(!!entry.plannedStartAt)),
+      // Short on purpose. For Round 1 this is the second time they've seen a
+      // start button — the first was on their Round 0 result, which explained
+      // the whole mechanic — so repeating the explanation reads as though we'd
+      // forgotten. For Round 2 it's the first, and the warning carries it.
+      `${head}\n**Your piece is ready.** Start it whenever you like; there's no ` +
+      `deadline on starting, and nobody needs to be here for it.\n\n` +
+      `${startWarning(ROUND_REVEAL[round], ctx.windowDays)}` +
+      targetLine(record, round) +
+      runLine(record, ctx, now),
+    components: row(BUTTON.start(round)),
   };
 }
 
@@ -643,11 +616,22 @@ export function statusPanel(
             ? "submitted — waiting on your feedback and the call"
             : "not submitted";
 
-  const lines = [
-    `Round 0 · ${zeroLine}`,
-    `Round 1 · ${STATE_LINE[windowState(roundOf(record, 1), ctx.windowDays, now)]}`,
-    `Round 2 · ${STATE_LINE[windowState(roundOf(record, 2), ctx.windowDays, now)]}`,
-  ];
+  // Only the rounds they've actually reached.
+  //
+  // It used to print all three always, which meant somebody who registered an
+  // hour ago read "Round 2 · waiting on us" — true, and meaningless — and
+  // somebody whose Round 0 didn't go through got a tidy list of two rounds they
+  // will never dance. A round nobody has got to yet has nothing to report.
+  const reached = activeRound(record, now);
+  const upTo = reached.ok
+    ? reached.round
+    : ([2, 1, 0] as Round[]).find((one) => roundOf(record, one).outcome) ?? 0;
+
+  const lines = [`Round 0 · ${zeroLine}`];
+  for (const one of [1, 2] as Round[]) {
+    if (one > upTo) continue;
+    lines.push(`Round ${one} · ${STATE_LINE[windowState(roundOf(record, one), ctx.windowDays, now)]}`);
+  }
   if (record.enforcedAt) {
     lines.push(`Membership · renews by ${day(record.enforcedAt)}`);
   }
@@ -699,11 +683,6 @@ export function statusPanel(
  * DIAMONDS.md warns about is a round sitting on one ballot against a threshold
  * of two, settling never, and nothing surfacing it. This is what surfaces it.
  */
-/** Their estimate for whatever round they're actually in. */
-function plannedOf(record: DiamondsRecord, round: Round | null): string | undefined {
-  return round === null ? undefined : roundOf(record, round).plannedStartAt;
-}
-
 function ballotNote(entry: RoundRecord, minScores: number): string {
   const counted = tally(entry, minScores);
   if (counted.complete) return "**settled — result not sent**";
@@ -787,10 +766,13 @@ export function rosterReadout(
     return { record, round, note: "piece up, hasn't started", side: "theirs" };
   });
 
+  // The estimate used to be on this line. It's gone with `/diamonds plan`: the
+  // deadline is what the roster is actually for, and a date somebody guessed at
+  // was never the thing that told you when to expect them.
   const line = ({ record, round, note }: Row) =>
     `· <@${record.discordId}> — ${round === null ? "" : `**R${round}** `}${note}` +
     `${record.cohort === "returning" ? " · returning" : ""}` +
-    `${plannedOf(record, round) ? ` · plans ${plannedOf(record, round)}` : ""}` +
+    `${runDaysLeft(record, ctx.runDays, now) !== undefined ? ` · ${runDaysLeft(record, ctx.runDays, now)}d left` : ""}` +
     `${round === 1 && record.target ? ` · targeting ${record.target}` : ""}`;
 
   const ours = rows.filter((one) => one.side === "ours");
@@ -988,7 +970,8 @@ export function ballotReceipt(
     if (counted.verdict !== "split") {
       lines.push(
         record.document?.deliveredAt
-          ? `Sent — Round 1 is open for them, start button and all.`
+          ? `Sent, with the feedback and their start button on it. Round 1 is ` +
+            `theirs to begin.`
           : record.document
             ? roundOf(record, 1).assignedPiece
               ? `Their feedback is written and goes out with this. Nothing has ` +
@@ -1280,22 +1263,10 @@ function reviewRows(
     });
   }
 
-  // The branch. A Round 1 that didn't move is a fail, and this is the other
-  // thing you can do about it: carry them into Round 2 with nothing at stake.
-  //
-  // Only here, and only on a fail. It's offered at the moment the decision is
-  // actually in front of someone, rather than as a policy decided in advance
-  // about a dancer nobody has watched yet — and it changes the round that
-  // hasn't happened, which is why it can't be a second verdict on this one.
-  if (round === 1 && settled?.outcome === "failed" && !anyPractice(record)) {
-    buttons.push({
-      type: ComponentType.BUTTON,
-      style: ButtonStyle.SECONDARY,
-      label: "Carry on as practice",
-      custom_id: diamondsCustomId("carry", id),
-    });
-  }
-
+  // There was a "Carry on as practice" button here, for a director to offer
+  // after a Round 1 fail. It's gone: the offer is on every failed result now,
+  // as the dancer's own button. Whether to dance the rest of it is their call,
+  // and a director choosing for them made it a favour rather than an option.
   return [{ type: ComponentType.ACTION_ROW, components: buttons }];
 }
 
@@ -1398,106 +1369,118 @@ ${overallBand(counted.scores, opts.bar)}
  * the one irreversible step in the whole process. Everything else can be
  * corrected; a result cannot be unsent.
  */
+/**
+ * What a dancer is told when a round is decided.
+ *
+ * **No scores, in any round, in any outcome.** The rubric exists so that two
+ * directors reach the same reading of the same video; it is an instrument for
+ * them, not a report card. A dancer given 6.5 has been handed a number to argue
+ * with or carry around, in place of the sentence that would have told them what
+ * to do differently — so the written feedback is the whole of the body here, and
+ * this function can no longer reach a score even by accident.
+ *
+ * It also can't be called without one: `sendResult` refuses a result with no
+ * written feedback, which is the rule that makes "the feedback is the message"
+ * true rather than aspirational.
+ */
 export function resultMessage(
   record: DiamondsRecord,
   round: Round,
   settled: Settled,
-  counted: Tally,
   feedback: string,
   ctx: PanelContext,
-  policy: { weights: Weights; bar: number; floor: number },
+  now: Date,
 ): string {
   const name = cycleName(ctx.timeline);
-  // Appended rather than woven in, so a director's own words arrive as their
-  // own words rather than as part of a generated verdict.
-  const notes = feedback.trim()
-    ? `\n\n**What the directors wrote**\n\n${feedback.trim()}`
-    : "";
+  const notes = `\n\n${feedback.trim()}`;
+  // Said on every ending, because "when can I come back" is the first question
+  // and the honest answer is a date rather than an encouragement.
+  const again = `<t:${Math.floor(
+    new Date(waitEndsAt(now.toISOString(), ctx.retryMonths)).getTime() / 1000,
+  )}:D>`;
 
   // Practice says what we saw and stops. No verdict, because there wasn't one —
-  // which is the whole of what a practice dancer asked for, and the one thing
-  // this message must not quietly supply anyway.
+  // which is the whole of what a practice dancer asked for.
   if (settled.outcome === "practice") {
-    const scored = counted.scores
-      ? `\n\n${DIMENSIONS.map((one) => `· ${DIMENSION_LABEL[one]} — **${counted.scores![one].toFixed(1)}**`).join("\n")}`
-      : counted.targetScore !== undefined
-        ? `\n\n**${record.target ?? "What we were watching"}:** ` +
-          `**${counted.targetScore.toFixed(1)}**` +
-          (record.targetBefore !== undefined
-            ? ` now, against ${record.targetBefore.toFixed(1)} before.`
-            : ".")
-        : "";
     return (
       `**${name} — Round ${round}, practice**\n\n` +
-      `📝 **Here's what we saw.** This one was practice, so there's no pass or ` +
-      `fail in it and nothing rides on the numbers — they're there because a ` +
-      `read you can't see isn't feedback.${scored}\n\n` +
+      `Thank you for your submission. This round was practice, so there's no ` +
+      `pass or fail attached to it and nothing is recorded against you.` +
+      notes +
       (round === 2
-        ? `That's the end of the run. Nothing is recorded against you, and you ` +
-          `can audition for real whenever you want to.`
-        : `Your next piece will arrive here the same way.`) +
-      notes
+        ? `\n\nThat's the end of the run. You're welcome to audition for real ` +
+          `whenever you like.\n\nQuestions to a director.`
+        : `\n\nYour next piece will arrive here the same way.\n\nQuestions to a ` +
+          `director.`)
     );
   }
 
   if (round === 1) {
-    const moved = settled.advancement;
-    const delta = moved
-      ? `\n\n**${record.target ?? "What we asked you to work on"}:** ` +
-        `${moved.before.toFixed(1)} before, **${moved.after.toFixed(1)}** now.`
-      : "";
     return settled.outcome === "advanced"
-      ? `**${name} — Round 1**\n\n🎉 **You're through to Round 2.**${delta}\n\n` +
-          (moved?.because === "already-there"
-            ? `You were already strong there and held it, which counts.`
-            : `That's real movement on the thing we named, which is exactly what ` +
-              `this round was asking for.`) +
-          `\n\nYour final piece will arrive here. Everyone dances the same one, you ` +
-          `get it privately when you start, and you'll have ${ctx.windowDays} days.` +
-          notes
-      : record.practiceFrom === 2
-        ? // Carried on. The fail is still said plainly — softening it here is
-          // what would make the offer feel like a consolation prize.
-          `**${name} — Round 1**\n\n🚫 **That didn't move enough to carry you ` +
-            `into Round 2 for real.**${delta}\n\n` +
-            `**We'd like you to do Round 2 anyway, as practice.** Same piece as ` +
-            `everyone, same ${ctx.windowDays} days, same written feedback — and ` +
-            `no pass or fail at the end of it, because this run is already ` +
-            `decided. Nothing is recorded against you and nothing stops you ` +
-            `auditioning again.\n\n` +
-            `Your piece will arrive here. If you'd rather stop, that's completely ` +
-            `fine — tell a director.` + notes
-        : `**${name} — Round 1**\n\n🚫 **Not through to Round 2 this time.**${delta}\n\n` +
-            `That's the one thing this round measured, and it didn't move enough to ` +
-            `carry you forward. It isn't a verdict on you as a dancer and it isn't ` +
-            `the end of anything — keep working on it, and audition again. We'd ` +
-            `rather you did.` + notes;
+      ? `**${name} — Round 1**\n\n` +
+          `Thank you for your submission. You're through to Round 2.` +
+          notes +
+          `\n\n**Round 2 is the Director's Choice piece** — one piece, the same ` +
+          `for everyone. It'll arrive here when it's assigned, and you'll have ` +
+          `${ctx.windowDays} days with it once you start.\n\n` +
+          `Questions to a director.`
+      : `**${name} — Round 1**\n\n` +
+          `Thank you for your submission. We've decided not to take this one ` +
+          `through to Round 2.` +
+          notes +
+          `\n\nYou're welcome to audition again from ${again}.\n\n` +
+          `**If you'd like to dance Round 2 as practice**, the button below sets ` +
+          `that up: the same piece as everyone, the same ${ctx.windowDays} days, ` +
+          `the same written feedback, and no verdict at the end of it. It costs ` +
+          `nothing and doesn't change this result.\n\n` +
+          `Questions to a director.`;
   }
 
-  const scores = counted.scores;
-  const detail = scores
-    ? `\n\n${DIMENSIONS.map((one) => `· ${DIMENSION_LABEL[one]} — **${scores[one].toFixed(1)}**`).join("\n")}\n` +
-      `Weighted: **${weightedScore(scores, policy.weights).toFixed(2)}**`
-    : "";
 
   // The renewal date is said here, once, at the only moment it is unambiguously
   // good news. Saying it for the first time sixty days before it expires makes
   // it an eviction notice; saying it now makes it the shape of the thing they
   // just joined.
   const membership = record.enforcedAt
-    ? `\n\n**Your membership runs to ${day(record.enforcedAt)}.** Diamonds is ` +
-      `re-auditioned rather than permanent — go again before then and it renews, ` +
-      `and going early in the half is worth a longer next term. We'll remind you ` +
-      `well ahead; nothing to think about for months.`
+    ? `\n\n**Your membership runs to ${day(record.enforcedAt)}.** Membership is ` +
+      `renewed by re-auditioning, and re-auditioning earlier in the half of the ` +
+      `year gives you a longer next term. We'll remind you well ahead of the date.`
     : "";
 
   return settled.outcome === "passed"
-    ? `**${name} — Round 2**\n\n🎉 **You've passed.** Welcome to Diamonds.${detail}\n\n` +
-        `You cleared ${policy.bar} with nothing below ${policy.floor}. A director ` +
-        `will be in touch about what happens next.${membership}` + notes
-    : `**${name} — Round 2**\n\n🚫 **Not this cycle.**${detail}\n\n` +
-        `The bar was ${policy.bar} weighted, with nothing below ${policy.floor} in ` +
-        `any one area. Those are your actual numbers, not a softened version — ` +
-        `you're welcome to them and welcome to ask us about any of them.\n\n` +
-        `Getting this far is not nothing, and there'll be another audition.` + notes;
+    ? `**${name} — Round 2**\n\n` +
+        `Thank you for your submission. **You've passed — welcome to Diamonds.**` +
+        notes +
+        `${membership}\n\n` +
+        `A director will be in touch about what happens next.`
+    : `**${name} — Round 2**\n\n` +
+        `Thank you for your submission. We've decided not to take this one ` +
+        `through.` +
+        notes +
+        `\n\nYou're welcome to audition again from ${again}.\n\n` +
+        `Questions to a director.`;
+}
+
+/**
+ * The practice offer, as a button under a result that didn't go through.
+ *
+ * Offered on every failure rather than picked per dancer, which is why it lives
+ * here and not on a director's card: whether to dance the rest of it is the
+ * dancer's call, and a director choosing for them would make it a favour.
+ *
+ * Nothing under Round 2 — there is no round after it to practise.
+ */
+export function resultComponents(
+  record: DiamondsRecord,
+  round: Round,
+  settled: Settled,
+): unknown[] {
+  const failed = settled.outcome === "failed";
+  if (!failed || round === 2 || anyPractice(record)) return [];
+  return row({
+    type: ComponentType.BUTTON,
+    style: ButtonStyle.SECONDARY,
+    label: `Dance Round ${round + 1} as practice`,
+    custom_id: diamondsCustomId("practice", "me"),
+  });
 }

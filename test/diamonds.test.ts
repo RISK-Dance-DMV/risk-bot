@@ -113,7 +113,7 @@ describe("what someone can do without a director present", () => {
   it("refuses to hand over a piece that isn't assigned, and says it's not their fault", () => {
     const check = pieceReady({});
     expect(check.ok).toBe(false);
-    if (!check.ok) expect(check.reason).toContain("Nothing's wrong on your end");
+    if (!check.ok) expect(check.reason).toContain("It'll arrive here when it is");
   });
 
   it("lets them start once a piece is up", () => {
@@ -351,9 +351,9 @@ describe("starting reveals the piece", () => {
 
   it("warns that the button does both things, and that it can't be undone", () => {
     const warning = startWarning("on-start", WINDOW);
-    expect(warning).toContain("starts your clock at the same");
+    expect(warning).toContain("starts your clock");
     expect(warning).toContain("learn it, record");
-    expect(warning).toContain("un-press");
+    expect(warning).toContain("can't be undone");
   });
 
   it("warns only about the clock when the piece is already public", () => {
@@ -711,8 +711,8 @@ describe("Round 1 waits on the feedback", () => {
     const check = canStartWindow(who(), 1, WINDOW, at("2026-11-19T00:00:00.000Z"));
     expect(check.ok).toBe(false);
     if (!check.ok) {
-      expect(check.reason).toMatch(/feedback hasn't reached you/);
-      expect(check.reason).toMatch(/Nothing's wrong on your end/);
+      expect(check.reason).toMatch(/hasn.t gone out yet/);
+      expect(check.reason).toMatch(/It.ll arrive with your piece/);
     }
   });
 
