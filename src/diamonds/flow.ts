@@ -59,10 +59,9 @@ import {
   feedbackRevealed,
   feedbackReady,
   feedbackSentOut,
-  feedbackUnread,
   needsPlanReminder,
-  needsReminder,
   needsRound0Nudge,
+  needsReminder,
   needsStartHeadsUp,
   roundOf,
   roundToScore,
@@ -88,6 +87,7 @@ import {
 import {
   cycleName,
   feedbackArrived,
+  feedbackRefused,
   resultMessage,
   reviewCard,
   roundPanel,
@@ -197,7 +197,20 @@ export async function register(
   discordId: string,
   displayName: string,
   cohort: Cohort,
-  plannedStartAt: string | undefined,
+  /**
+   * Their Round 0 cover, because registering **is** submitting it.
+   *
+   * The two used to be separate steps with an estimated date in between, and
+   * the gap was the single biggest source of people going quiet: you could put
+   * your name down, mean it, and never send anything — and the bot's whole
+   * answer to that was a nudge. Asking for the cover at the door removes the
+   * state entirely. There is no longer such a thing as registered-but-not-
+   * started.
+   *
+   * Newcomers only. A returning Diamond owes no cover, so this is undefined for
+   * them and the round is decided on their season.
+   */
+  cover: string | undefined,
   timeline: DiamondsTimeline,
   policy: DiamondsPolicy,
   now: Date,
@@ -257,11 +270,30 @@ export async function register(
   // and running it twice shouldn't change what someone signed up for.
   if (practice) base.practiceFrom = 0;
 
-  // The estimate given at registration is Round 0's. Later rounds get their own
-  // through `/diamonds plan`, when the piece is actually in front of them.
-  const record = plannedStartAt
-    ? withRound(base, 0, { plannedStartAt })
-    : base;
+  // The cover, which is the registration. Only a newcomer owes one, and only if
+  // they haven't already got one in — running the command again to check you're
+  // on the list shouldn't need the link a second time.
+  const owes = base.cohort === "new" && !roundOf(base, 0).submittedAt;
+  const link = cover?.trim();
+  if (owes && !link) {
+    return {
+      ok: false,
+      reason:
+        "Registering **is** sending your Round 0 cover, so it needs a link: " +
+        "`/diamonds register cover:<url>`.\n" +
+        "Your own choice of piece, and an existing one from the last six months " +
+        "is fine — you don't have to film anything new. It's judged as a yes or " +
+        "a no rather than scored, and you get written feedback either way.",
+    };
+  }
+  if (link && !/^https?:\/\/\S+$/i.test(link)) {
+    return { ok: false, reason: "That doesn't look like a link. Paste the full URL." };
+  }
+
+  const record =
+    link && base.cohort === "new"
+      ? withRound(base, 0, { submissionUrl: link, submittedAt: now.toISOString() })
+      : base;
   await putRecord(env, record);
   return { ok: true, record };
 }
@@ -655,21 +687,18 @@ export async function assignPiece(
     return { ok: false, reason: `<@${discordId}> isn't registered for this audition.` };
   }
 
-  // The ordering the whole rule rests on: feedback first, then the piece. Round
-  // 1 is a response to the feedback, so a piece assigned before it is a piece
-  // nobody can start.
-  // Keyed to the document having *gone out*, not to their having opened it. A
-  // director shouldn't be held up by a dancer's inbox, and the piece is only
-  // revealed on start anyway — so it can sit there waiting for them.
-  const ready = feedbackSentOut(record, round);
-  if (!ready.ok) {
-    return {
-      ok: false,
-      reason:
-        `<@${discordId}> hasn't had their feedback yet, and that's what opens ` +
-        `Round 1. Send it with \`/diamonds feedback\` first — then the piece.`,
-    };
-  }
+  // **The piece goes up before the feedback goes out, and sends it.**
+  //
+  // The ordering used to be the other way round, and it put the dancer in a
+  // state nobody wanted: reading the document opened Round 1, so a read that
+  // arrived before a director had chosen a piece landed them on a panel saying
+  // "waiting on us". Now the document is written whenever, held, and released
+  // by this call — one message to them, with the piece already behind it.
+  //
+  // So nothing is refused here. `documentReady` is where the waiting lives, and
+  // the only requirement left on a director is to write the feedback at some
+  // point; the order they do the two in no longer matters.
+  const held = round === 1 && !!record.document && !record.document.deliveredAt;
 
   const entry = roundOf(record, round);
   if (entry.windowOpenedAt) {
@@ -711,6 +740,26 @@ export async function assignPiece(
     assignedAt: now.toISOString(),
   });
   await putRecord(env, updated);
+
+  // The held document, if this call is what unblocked it. One message rather
+  // than two: the notice is the thing that tells them there's a piece, and a
+  // separate "your piece is up" beside it would be the same news twice.
+  if (held) {
+    const ready = documentReady(updated, policy.minScores);
+    if (ready.ok) {
+      const delivered = await deliverDocument(env, updated, policy, now.toISOString());
+      await putRecord(env, delivered.record);
+      await refreshReviewCard(env, delivered.record, 0, policy);
+      return {
+        ok: true,
+        record: delivered.record,
+        warning: delivered.reached
+          ? undefined
+          : `Piece is up, but couldn't DM <@${discordId}> — so their feedback hasn't ` +
+            `gone and Round 1 hasn't opened. Fix their DMs and run this again.`,
+      };
+    }
+  }
 
   const reached = await tell(env, updated, round, timeline, policy, now);
   return {
@@ -1052,13 +1101,12 @@ export async function fileFeedback(
 }
 
 /**
- * Sends the notice that a document exists, and marks it delivered.
+ * Sends the document, and marks it delivered.
  *
  * This is also how Round 0's result is sent, which is why it writes
- * `resultSentAt` and the outcome: the verdict goes out with the notice, so
- * nobody has to click to find out whether they're through. What the click is
- * for is the document, and **the click is what opens Round 1** — see
- * `FeedbackDocument.readAt`.
+ * `resultSentAt` and the outcome: the verdict travels inside the document
+ * rather than beside it. One message either way — a pass carries Round 1's
+ * start button, a fail carries the practice offer.
  *
  * Nothing is recorded unless the DM actually arrived. A verdict nobody received
  * hasn't been delivered, and marking Round 0 done on a failed send would strand
@@ -1072,20 +1120,70 @@ async function deliverDocument(
 ): Promise<{ record: DiamondsRecord; reached: boolean }> {
   const doc = record.document!;
   const settled = settleRound(record, 0, policy);
+  const passed = settled?.outcome === "passed";
+
+  // Both get the whole document. Nothing a dancer is owed sits behind a click,
+  // and the feedback is owed either way — what differs is what comes after it:
+  // a pass has a button to the next round, a fail has one to practice.
+  const written = feedbackMessage(
+    doc.content,
+    doc.strengths,
+    doc.growthAreas,
+    passed,
+    policy,
+  ).content!;
   const reached = await sendDirectMessage(
     env,
     record.discordId,
-    feedbackArrived(settled?.outcome === "passed", policy.windowDays),
+    passed
+      ? feedbackArrived(written, policy.windowDays)
+      : feedbackRefused(written, policy.windowDays),
   );
   if (!reached) return { record, reached };
   return {
     record: withRound(
-      { ...record, document: { ...doc, deliveredAt: at } },
+      {
+        ...record,
+        document: { ...doc, deliveredAt: at },
+      },
       0,
       { resultSentAt: at, outcome: settled?.outcome, outcomeAt: at },
     ),
     reached: true,
   };
+}
+
+/**
+ * A dancer taking the practice offer after a Round 0 fail.
+ *
+ * Theirs to decide, which is why it's a button on their own message rather than
+ * something a director grants: the question is whether they want to dance it,
+ * and nobody else can answer that.
+ *
+ * `practiceFrom: 1` leaves Round 0's fail exactly where it is — the same way a
+ * Round 1 carry keeps its fail. The verdict stands; what changes is that there
+ * are two more rounds after it.
+ */
+export async function takePractice(env: Env, discordId: string): Promise<FlowResult> {
+  const record = await getRecord(env, discordId);
+  if (!record) {
+    return { ok: false, reason: "You're not registered for this audition." };
+  }
+  if (record.practiceFrom !== undefined) {
+    return { ok: false, reason: "You're already down as practice — nothing to change." };
+  }
+  if (roundOf(record, 0).outcome !== "failed") {
+    return {
+      ok: false,
+      reason:
+        "That offer goes with a Round 0 we didn't take through, and yours isn't " +
+        "one. Nothing to do here.",
+    };
+  }
+
+  const practising: DiamondsRecord = { ...record, practiceFrom: 1 };
+  await putRecord(env, practising);
+  return { ok: true, record: practising };
 }
 
 /**
@@ -1220,49 +1318,6 @@ async function judgesDiamonds(
 }
 
 /**
- * A dancer opening their Round 0 feedback, which is what opens Round 1.
- *
- * Idempotent on purpose. Re-reading is a thing people do — the document is the
- * only record of what they were asked to work on, and they will come back to it
- * mid-window — so a second press shows it again and leaves `readAt` where it
- * was. The first read is the one the round turns on.
- */
-export async function markFeedbackRead(
-  env: Env,
-  discordId: string,
-  policy: DiamondsPolicy,
-  now: Date,
-): Promise<FlowResult & { payload?: MessagePayload }> {
-  const record = await getRecord(env, discordId);
-  const doc = record?.document;
-  if (!record || !doc?.deliveredAt) {
-    return {
-      ok: false,
-      reason:
-        "There's no feedback of yours to open yet. If you think there should be, " +
-        "say so in #diamonds-bot — that's worth a director looking at.",
-    };
-  }
-
-  const settled = settleRound(record, 0, policy);
-  const payload = feedbackMessage(
-    doc.content,
-    doc.strengths,
-    doc.growthAreas,
-    settled?.outcome === "passed",
-    policy,
-  );
-
-  if (doc.readAt) return { ok: true, record, payload };
-
-  const read: DiamondsRecord = {
-    ...record,
-    document: { ...doc, readAt: now.toISOString() },
-  };
-  await putRecord(env, read);
-  return { ok: true, record: read, payload };
-}
-
 /* -------------------------------------------------------------------------- */
 /* The daily sweep                                                             */
 /* -------------------------------------------------------------------------- */
@@ -1295,6 +1350,7 @@ export async function runDiamondsSweep(
   reminded: number;
   nudged: number;
   headsUp: number;
+  /** On the list with no cover in — only reachable via `/diamonds add`. */
   round0: number;
   planned: number;
   /** Delivered feedback nobody has opened, nudged once. */
@@ -1316,6 +1372,7 @@ export async function runDiamondsSweep(
   let unread = 0;
   let warned = 0;
   let expired = 0;
+  const overdue: { discordId: string; round: Round; days: number }[] = [];
   let renewals = 0;
   let lapsed = 0;
   let blocked = 0;
@@ -1341,6 +1398,24 @@ export async function runDiamondsSweep(
     // reminder again tomorrow.
     let current = record;
     let spoke = false;
+
+    // Anything that has been sitting on a director's desk longer than the
+    // turnaround we promised. Collected here and sent as one message after the
+    // loop, because two directors do not want a DM per dancer — and because the
+    // useful form of this is a list, which is what makes it obvious when one
+    // person has been waiting much longer than the rest.
+    if (!quiet) {
+      const owed = roundToScore(current, policy.minScores);
+      if (owed !== undefined) {
+        const since = roundOf(current, owed).submittedAt ?? current.registeredAt;
+        const waited = since
+          ? Math.floor((now.getTime() - new Date(since).getTime()) / (24 * 60 * 60 * 1000))
+          : 0;
+        if (waited > policy.reviewMaxDays) {
+          overdue.push({ discordId: current.discordId, round: owed, days: waited });
+        }
+      }
+    }
 
     for (const round of [1, 2] as Round[]) {
       if (spoke || quiet) break;
@@ -1400,16 +1475,20 @@ export async function runDiamondsSweep(
       }
     }
 
-    // And the one nobody else can reach: registered, never submitted Round 0,
-    // no window to key off and no piece to wait on.
+    // On the list with no cover in.
+    //
+    // Registering is sending the cover now, so a dancer can't put themselves in
+    // this state — but `/diamonds add` still can, and someone a director added
+    // is the person least likely to know what they owe. Narrower than it was
+    // and worth keeping for exactly that.
     if (!spoke && !quiet && needsRound0Nudge(current, policy.headsUpDays, now)) {
       await sendDirectMessage(env, current.discordId, {
         content:
-          `👋 **You registered ${policy.headsUpDays} days ago and haven't sent ` +
-          `your Round 0 cover yet.** There's no deadline on it — nothing closes, ` +
-          `and nobody is waiting on anybody else.\n` +
-          `An existing cover from the last six months is fine — ` +
-          `\`/diamonds submit link:<url>\`.`,
+          `👋 **You're on the Diamonds list, and we haven't got a cover from you ` +
+          `yet.** A director put you on rather than you registering, so this may ` +
+          `be news: Round 0 is a video of your own choosing, and an existing one ` +
+          `from the last six months is fine.\n` +
+          `\`/diamonds submit link:<url>\` whenever you like.`,
       });
       current = withRound(current, 0, { startNudgedAt: now.toISOString() });
       await putRecord(env, current);
@@ -1417,26 +1496,11 @@ export async function runDiamondsSweep(
       spoke = true;
     }
 
-    // Feedback delivered and never opened, which is the one way to get stuck
-    // that needs nobody's cooperation. Once, then it's theirs: a document is a
-    // thing you read when you're ready to read it, and a bot that asks twice is
-    // a bot telling someone how to feel about their own feedback.
-    if (!spoke && !quiet && feedbackUnread(current, policy.nudgeDays, now)) {
-      await sendDirectMessage(env, current.discordId, {
-        content:
-          `📄 **Your Round 0 feedback is still unopened.** No rush from us, and ` +
-          `nothing expires — but **Round 1 doesn't open until you've read it**, ` +
-          `so it's the one thing standing between you and your next piece.\n` +
-          `It's the message above this one.`,
-      });
-      current = {
-        ...current,
-        document: { ...current.document!, readNudgedAt: now.toISOString() },
-      };
-      await putRecord(env, current);
-      unread += 1;
-      spoke = true;
-    }
+    // There was an "unopened feedback" nudge here, for a dancer who had been
+    // sent their pass and not pressed the button that opened Round 1. The
+    // button went — the pass now carries the start button itself — and the state
+    // went with it: somebody who hasn't started is in the ordinary
+    // not-started-yet state, which the heads-up above already covers.
 
     // The two-month clock. Two passes: a warning while there's still time to do
     // something, then the close itself.
@@ -1579,6 +1643,26 @@ export async function runDiamondsSweep(
         renewals += 1;
       }
     }
+  }
+
+  // One message to the two of them, every morning there is anything late.
+  //
+  // No marker and no "once": unlike every dancer-facing message here, this one
+  // is about work that is still outstanding, so repeating it daily is the point
+  // and it stops the day the list empties. Sorted longest-waiting first, since
+  // that is the one that has to move.
+  if (overdue.length > 0) {
+    const lines = overdue
+      .sort((a, b) => b.days - a.days)
+      .map((one) => `· <@${one.discordId}> — Round ${one.round}, **${one.days} days**`);
+    await alertDirectors(
+      env,
+      `⏰ **${overdue.length} waiting on a ballot longer than the ` +
+        `${policy.reviewMaxDays} days we promise:**\n${lines.join("\n")}\n` +
+        `Their ${policy.runDays} days keep running while they wait, so this is the ` +
+        `thing most likely to cost somebody an audition they'd have finished. ` +
+        `\`/diamonds roster\` has the rest.`,
+    );
   }
 
   return {

@@ -337,8 +337,8 @@ export const DIAMONDS_COMMAND = {
       options: [
         {
           type: ApplicationCommandOptionType.STRING,
-          name: "plan",
-          description: "Roughly when you'll send your Round 0 (YYYY-MM-DD) — an estimate, not a commitment",
+          name: "cover",
+          description: "Link to your Round 0 cover — your own piece, and an old one is fine",
           required: false,
         },
         {

@@ -62,8 +62,6 @@ export type DiamondsAction =
   /** The ephemeral read-back that the one irreversible button lives on. */
   | "preview"
   | "send"
-  /** A dancer opening their Round 0 feedback, which is what opens Round 1. */
-  | "read"
   /** Round 1 didn't move: carry them into Round 2 as practice instead. */
   | "carry"
   /** The dancer's own four, so `register` is the only thing anyone types. */
@@ -71,7 +69,9 @@ export type DiamondsAction =
   | "submit-save"
   | "plan"
   | "plan-save"
-  | "leave";
+  | "leave"
+  /** A dancer taking the practice offer after a Round 0 fail. */
+  | "practice";
 
 const ACTIONS: DiamondsAction[] = [
   "start",
@@ -85,13 +85,13 @@ const ACTIONS: DiamondsAction[] = [
   "note-save",
   "preview",
   "send",
-  "read",
   "carry",
   "submit",
   "submit-save",
   "plan",
   "plan-save",
   "leave",
+  "practice",
 ];
 const PREFIX = "dia";
 const ARG = /^[0-9a-zA-Z:_-]{1,64}$/;
@@ -175,44 +175,75 @@ export interface PanelContext {
 }
 
 /**
- * The notice that feedback exists, and the button that opens it.
+ * A pass: the news, the document, and the one button that matters.
  *
- * The verdict is in the notice rather than behind the button. Holding a "we're
- * not taking this through" behind a click would make opening it an act of
- * courage, and the one thing a dancer is owed immediately is the decision; what
- * the button is for is the reasons, which take a minute they should be able to
- * choose.
+ * Everything a dancer is owed arrives at once — the verdict and the reasons,
+ * because both are theirs the moment they're written.
  *
- * Keyed to nobody, like the start button: the clicker's own id comes off the
- * interaction, so the same notice is safe anywhere.
+ * **One button, and it's the real one.** Two earlier versions each put a step
+ * in front of the piece: one held the document behind a click, the other held
+ * the *round* behind a click that revealed nothing. The second needed a
+ * paragraph explaining that it was safe to press, which is the tell — a button
+ * whose only job is to prove it does nothing is a button that shouldn't exist.
+ *
+ * So this is the start button, on the message that tells them they passed. It
+ * reveals the piece and starts the clock together, exactly as it does from the
+ * panel, and `startWarning` says so above it. Nothing is lost by collapsing the
+ * two: the dancer still presses when they're ready, and "when they're ready"
+ * was always the only thing the extra step was protecting.
+ *
+ * Only sent once the Round 1 piece is up, which is what makes the button
+ * pressable at all.
+ *
+ * Keyed to the round rather than to the person: the clicker's own id comes off
+ * the interaction, so the same message is safe anywhere.
  */
-export function feedbackArrived(passed: boolean, windowDays: number): MessagePayload {
+export function feedbackArrived(document: string, windowDays: number): MessagePayload {
   return {
-    content: passed
-      ? `💎 **Round 0: you're through.** Your written feedback is ready — the ` +
-        `reasons, what you brought, and the one thing we want to see move.
+    content:
+      `💎 **Round 0: you're through to Round 1.** Nicely done.\n\n` +
+      `${document}\n\n` +
+      `**Your Round 1 piece is ready when you are.**\n` +
+      `${startWarning(ROUND_REVEAL[1], windowDays)}\n\n` +
+      `No hurry: read the above properly first, and press it when you've got ` +
+      `${windowDays} days you're happy to spend.`,
+    components: row(BUTTON.start(1)),
+  };
+}
 
-` +
-        `**Opening it is what starts Round 1**, so read it when you've got a ` +
-        `proper minute rather than between trains. Nothing is timed by this: ` +
-        `your ${windowDays}-day window still only starts when you press start, ` +
-        `whenever that is.`
-      : `**Round 0: we're not taking this one through to Round 1.** That's our ` +
-        `call on what we saw, not a verdict on you as a dancer.
-
-` +
-        `Your written feedback is ready, and it's the part worth having — three ` +
-        `things you brought and the ones to work on. Read it whenever you want ` +
-        `to.`,
+/**
+ * A fail: everything at once, and a way to carry on anyway.
+ *
+ * Nothing is held back here, and that's the asymmetry. A pass holds the
+ * document because opening it *does* something — it starts Round 1, which is
+ * the dancer's to time. A fail opens nothing, so a button in front of the
+ * reasons would be a hoop for its own sake, and the reasons are the only part
+ * of a fail worth having.
+ *
+ * The practice offer is on this message rather than on a director's card
+ * because it is the dancer's call, and this is the moment they have the
+ * information to make it.
+ */
+export function feedbackRefused(document: string, windowDays: number): MessagePayload {
+  return {
+    content:
+      `**Round 0: we're not taking this one through to Round 1.** That's our ` +
+      `call on what we saw, not a verdict on you as a dancer.\n\n` +
+      `${document}\n\n` +
+      `**If you'd like to dance the rest of it anyway, you can.** Rounds 1 and 2 ` +
+      `as practice: the same pieces, the same ${windowDays}-day windows, the same ` +
+      `written feedback from both of us — and no verdict at the end, because this ` +
+      `one is already decided. It costs you nothing and it doesn't change this ` +
+      `result either way.`,
     components: [
       {
         type: ComponentType.ACTION_ROW,
         components: [
           {
             type: ComponentType.BUTTON,
-            style: ButtonStyle.PRIMARY,
-            label: passed ? "Read it & start Round 1" : "Read my feedback",
-            custom_id: diamondsCustomId("read", "me"),
+            style: ButtonStyle.SECONDARY,
+            label: "Dance the rest as practice",
+            custom_id: diamondsCustomId("practice", "me"),
           },
         ],
       },
@@ -299,16 +330,12 @@ function roundZeroPanel(
     // Nothing is assessed, so there is nothing for them to do but be on the
     // list. Said plainly, because "you're registered and that's all" reads like
     // a missing instruction otherwise.
-    const doc = record.document?.readAt
-      ? `You opened your feedback ${day(record.document.readAt)}, so Round 1 is ` +
-        `open for you — ask the directors for your piece if it hasn't arrived.`
-      : record.document?.deliveredAt
-        ? `**Your feedback is in your DMs, unopened.** Opening it is what opens ` +
-          `Round 1 — until then there's nothing for the round to be a response ` +
-          `to.`
-        : `The directors are writing up your season and deciding whether to take ` +
-          `you through. You'll get a note the moment it's ready, and opening it ` +
-          `is what opens Round 1 for you.`;
+    const doc = record.document?.deliveredAt
+      ? `Your feedback went out ${day(record.document.deliveredAt)}, so Round 1 ` +
+        `is open — the start button is on that message.`
+      : `The directors are writing up your season and deciding whether to take ` +
+        `you through. It arrives as one message, with your Round 1 piece behind ` +
+        `the button on it.`;
     // A renewal and a first-time returning Diamond are in the same state but
     // not in the same conversation: one of them is being told how this works
     // and the other already knows.
@@ -891,14 +918,14 @@ export function ballotReceipt(
     );
     if (counted.verdict !== "split") {
       lines.push(
-        record.document?.readAt
-          ? `Sent, and they've opened it — Round 1 is open for them.`
-          : record.document?.deliveredAt
-            ? `Sent, **not opened yet**. Round 1 doesn't open until they read ` +
-              `it; they get one nudge about that and then it's theirs.`
+        record.document?.deliveredAt
+          ? `Sent — Round 1 is open for them, start button and all.`
           : record.document
-            ? `Their feedback is written and goes out with this. Nothing has ` +
-              `reached them yet.`
+            ? roundOf(record, 1).assignedPiece
+              ? `Their feedback is written and goes out with this. Nothing has ` +
+                `reached them yet.`
+              : `Their feedback is written and **waiting on Round 1's piece** — ` +
+                `the two go out as one message, so \`/diamonds assign\` sends it.`
             : `Nothing has reached them yet: Round 0's result **is** their ` +
               `feedback, so write it with \`/diamonds feedback\` and it sends ` +
               `itself.`,

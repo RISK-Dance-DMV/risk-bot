@@ -11,7 +11,6 @@ import {
   settleRound,
   tally,
   feedbackReady,
-  feedbackUnread,
   canSubmit,
   DIMENSIONS,
   meanScore,
@@ -589,27 +588,21 @@ describe("moving through the rounds at your own pace", () => {
     expect(activeRound(who(), now)).toEqual({ ok: true, round: 0 });
   });
 
-  // The round turns on the *read*, not the send. Delivered-and-unopened is its
-  // own state, and it is the dancer's to leave: the document is the thing Round
-  // 1 is a response to, so until they have it there is nothing to respond to.
-  it("opens Round 1 the moment they open their feedback, whenever that is", () => {
-    const doc = {
-      content: "x",
-      strengths: ["a", "b", "c"],
-      growthAreas: ["arms"],
-      writtenBy: "d1",
-      submittedAt: "2026-11-17T00:00:00.000Z",
-      deliveredAt: "2026-11-17T00:00:00.000Z",
-    };
-    const unopened = who({
-      rounds: { 0: { submittedAt: "2026-11-16T00:00:00.000Z" } },
-      document: doc,
-    });
-    expect(activeRound(unopened, at("2026-11-17T00:01:00.000Z"))).toEqual({ ok: true, round: 0 });
-
+  // The round turns on the feedback having *gone out*. There was briefly a
+  // `readAt` in between, so that a document nobody had opened didn't open
+  // anything either — and the button it needed turned out to be a step in front
+  // of the piece for no gain. The pass carries the start button now instead.
+  it("opens Round 1 the moment their feedback goes out, whenever that is", () => {
     const early = who({
       rounds: { 0: { submittedAt: "2026-11-16T00:00:00.000Z" } },
-      document: { ...doc, readAt: "2026-11-17T00:00:00.000Z" },
+      document: {
+        content: "x",
+        strengths: ["a", "b", "c"],
+        growthAreas: ["arms"],
+        writtenBy: "d1",
+        submittedAt: "2026-11-17T00:00:00.000Z",
+        deliveredAt: "2026-11-17T00:00:00.000Z",
+      },
     });
     expect(activeRound(early, at("2026-11-17T00:01:00.000Z"))).toEqual({ ok: true, round: 1 });
     // And the same record a month later is still in Round 1 — no phase moved
@@ -618,7 +611,7 @@ describe("moving through the rounds at your own pace", () => {
   });
 
   /** A returning Diamond submits nothing, so the document *is* their Round 0. */
-  it("opens Round 1 for a returning Diamond when they open their feedback", () => {
+  it("opens Round 1 for a returning Diamond when their feedback goes out", () => {
     const waiting = who({ cohort: "returning" });
     expect(activeRound(waiting, now)).toEqual({ ok: true, round: 0 });
 
@@ -631,7 +624,6 @@ describe("moving through the rounds at your own pace", () => {
         writtenBy: "d1",
         submittedAt: "2026-11-18T00:00:00.000Z",
         deliveredAt: "2026-11-18T00:00:00.000Z",
-        readAt: "2026-11-18T09:00:00.000Z",
       },
     });
     expect(activeRound(sent, now)).toEqual({ ok: true, round: 1 });
@@ -677,7 +669,6 @@ describe("moving through the rounds at your own pace", () => {
         writtenBy: "d1",
         submittedAt: "2026-11-18T00:00:00.000Z",
         deliveredAt: "2026-11-18T00:00:00.000Z",
-        readAt: "2026-11-18T00:00:00.000Z",
       },
       rounds: { 1: { submittedAt: "x", resultSentAt: "y", outcome: "practice" } },
     });
@@ -704,7 +695,6 @@ describe("Round 1 waits on the feedback", () => {
     writtenBy: "d1",
     submittedAt: at,
     deliveredAt: at,
-    readAt: at,
   });
 
   const who = (over: Partial<DiamondsRecord> = {}): DiamondsRecord => ({
@@ -740,39 +730,13 @@ describe("Round 1 waits on the feedback", () => {
   /** Written but undelivered is not delivered — a failed DM blocks nothing open. */
   it("doesn't count feedback that never arrived", () => {
     const undelivered = who({
-      document: { ...delivered(), deliveredAt: undefined, readAt: undefined },
+      document: { ...delivered(), deliveredAt: undefined },
     });
     expect(feedbackReady(undelivered, 1).ok).toBe(false);
     expect(activeRound(undelivered, at("2026-11-19T00:00:00.000Z"))).toEqual({
       ok: true,
       round: 0,
     });
-  });
-
-  /**
-   * Delivered and unopened gets its own refusal, and the wording is the point:
-   * "hasn't reached you" sends someone to ask a director about a message that
-   * is already sitting in their DMs.
-   */
-  it("tells someone whose feedback is unopened where it is", () => {
-    const unread = who({ document: { ...delivered(), readAt: undefined } });
-    const check = feedbackReady(unread, 1);
-    expect(check.ok).toBe(false);
-    expect(check.ok === false && check.reason).toMatch(/in your DMs/);
-    expect(check.ok === false && check.reason).not.toMatch(/hasn't reached you/);
-  });
-
-  it("nudges an unopened document once, after the nudge window", () => {
-    const unread = who({ document: { ...delivered("2026-11-18T00:00:00.000Z"), readAt: undefined } });
-    expect(feedbackUnread(unread, 3, at("2026-11-20T00:00:00.000Z"))).toBe(false);
-    expect(feedbackUnread(unread, 3, at("2026-11-21T00:00:00.000Z"))).toBe(true);
-    // Once. A document is a thing you read when you're ready to.
-    const nudged = who({
-      document: { ...delivered("2026-11-18T00:00:00.000Z"), readAt: undefined, readNudgedAt: "2026-11-21T00:00:00.000Z" },
-    });
-    expect(feedbackUnread(nudged, 3, at("2026-11-25T00:00:00.000Z"))).toBe(false);
-    // And not at all once they've read it.
-    expect(feedbackUnread(who({ document: delivered("2026-11-18T00:00:00.000Z") }), 3, at("2026-11-25T00:00:00.000Z"))).toBe(false);
   });
 
   it("asks nothing of Rounds 0 and 2 — neither is a response to feedback", () => {

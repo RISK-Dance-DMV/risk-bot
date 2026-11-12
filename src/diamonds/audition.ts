@@ -296,22 +296,17 @@ export interface FeedbackDocument {
   growthAreas: string[];
   writtenBy: string;
   submittedAt: string;
-  /** Set when the notice that it exists actually reached the dancer. */
-  deliveredAt?: string;
   /**
-   * Set when they opened it, which is what opens Round 1.
+   * Set when it actually reached the dancer, and what opens Round 1.
    *
-   * Delivered and read are two different facts, and the round turns on the
-   * second one. Round 1 asks what someone did about a named weakness; a
-   * document sitting unopened in a DM has named nothing to anybody, so keying
-   * the round to delivery was keying it to our side of the exchange rather than
-   * theirs. This way the clock they control starts when they've actually got
-   * the thing, and `/diamonds roster` can tell "we owe them feedback" apart
-   * from "they haven't opened it".
+   * There was briefly a `readAt` as well, on the theory that a document nobody
+   * has opened has named nothing — so the round should turn on the read rather
+   * than the send. True as far as it goes, and it cost a button whose only job
+   * was to record intent. What replaced it is better: the message carries the
+   * document *and* the start button, so the thing they press when they're ready
+   * is the thing that was always going to matter.
    */
-  readAt?: string;
-  /** So the unread nudge goes once rather than every morning. */
-  readNudgedAt?: string;
+  deliveredAt?: string;
 }
 
 export interface DiamondsRecord {
@@ -473,9 +468,16 @@ export function runEndsAt(record: DiamondsRecord, runDays: number): string | und
  *
  * Finished ones are excluded rather than ignored: a pass on day 59 is a pass,
  * and a record that has already ended has nothing left for a deadline to do.
+ *
+ * **And it stops at their last submission.** Round 2 submitted means the dancer
+ * owes nothing: what's left is two directors watching a video, and a deadline
+ * that can close an audition while the only outstanding work is ours would be
+ * charging them six months for our turnaround. The clock measures their half of
+ * the process, which is the only half they can do anything about.
  */
 export function runExpired(record: DiamondsRecord, runDays: number, now: Date): boolean {
   if (auditionFinished(record)) return false;
+  if (roundOf(record, 2).submittedAt) return false;
   const ends = runEndsAt(record, runDays);
   if (!ends) return false;
   return now.getTime() > new Date(ends).getTime();
@@ -618,7 +620,7 @@ export function activeRound(record: DiamondsRecord, now: Date): ActiveRound {
   }
   if (first.submittedAt) return { ok: true, round: 2 };
 
-  return record.document?.readAt
+  return record.document?.deliveredAt
     ? { ok: true, round: 1 }
     : { ok: true, round: 0 };
 }
@@ -645,21 +647,7 @@ export function activeRound(record: DiamondsRecord, now: Date): ActiveRound {
  */
 export function feedbackReady(record: DiamondsRecord, round: Round): Check {
   if (round !== 1) return { ok: true };
-  if (record.document?.readAt) return { ok: true };
-
-  // Two refusals rather than one, because they are two completely different
-  // situations and only one of them is ours. Telling someone their feedback
-  // hasn't arrived when it is sitting unopened in their DMs sends them to ask a
-  // director about a message they already have.
-  if (record.document?.deliveredAt) {
-    return {
-      ok: false,
-      reason:
-        "Your feedback is in your DMs and hasn't been opened yet — open it and " +
-        "Round 1 starts. It's a read, not a commitment: your window still only " +
-        "starts when you press the button.",
-    };
-  }
+  if (record.document?.deliveredAt) return { ok: true };
   return {
     ok: false,
     reason:
@@ -669,13 +657,11 @@ export function feedbackReady(record: DiamondsRecord, round: Round): Check {
 }
 
 /**
- * Whether the feedback has *gone out* — a director's side of the same rule.
+ * The same rule from a director's side, kept separate because the message is.
  *
- * Separate from `feedbackReady` on purpose, and the split matters: putting the
- * piece up is a director's job and must not wait on a dancer's inbox, while
- * starting the window is the dancer's and does. So the piece can be assigned
- * the moment the document is sent, and sits there until they read it — which
- * is the state the review card now reports.
+ * Identical condition — the document having gone out — but it says "their" and
+ * is read when a director is the one being refused. One function with a
+ * parameter for whose fault it is would be worse than two.
  */
 export function feedbackSentOut(record: DiamondsRecord, round: Round): Check {
   if (round !== 1) return { ok: true };
@@ -684,25 +670,6 @@ export function feedbackSentOut(record: DiamondsRecord, round: Round): Check {
     ok: false,
     reason: "Their feedback hasn't gone out yet, and Round 1 is a response to it.",
   };
-}
-
-/**
- * Delivered, not opened, and old enough to be worth a word.
- *
- * The one new way to get stuck. Everything else in this process waits on a
- * director or on a window; this waits on a dancer doing nothing in particular,
- * which is exactly the state nobody notices themselves being in.
- */
-export function feedbackUnread(
-  record: DiamondsRecord,
-  afterDays: number,
-  now: Date,
-): boolean {
-  const doc = record.document;
-  if (!doc?.deliveredAt || doc.readAt || doc.readNudgedAt) return false;
-  if (record.withdrawnAt) return false;
-  const due = new Date(doc.deliveredAt).getTime() + afterDays * 24 * 60 * 60 * 1000;
-  return now.getTime() >= due;
 }
 
 
@@ -1918,6 +1885,24 @@ export function documentReady(record: DiamondsRecord, minScores: number): Check 
       reason:
         "Written, but held: one of you has this as a pass and the other as a " +
         "fail. Nothing settles on a split — talk it through and rescore.",
+    };
+  }
+
+  // A pass waits for Round 1's piece as well, so the two arrive together.
+  //
+  // Reading the document is what opens Round 1, and it used to be possible for
+  // that read to land them on a panel saying "waiting on us" — the round open,
+  // nothing in it, and a director still to choose a piece. Holding the pass
+  // until the piece is up makes the read do what it says: one message, and
+  // everything on the other side of it is ready.
+  //
+  // A fail doesn't wait, because there is no piece coming.
+  if (counted.verdict === "pass" && !roundOf(record, 1).assignedPiece) {
+    return {
+      ok: false,
+      reason:
+        "Written, and you've both called it a pass — held until their Round 1 " +
+        "piece is up, so the two arrive together. `/diamonds assign` sends it.",
     };
   }
   return { ok: true };

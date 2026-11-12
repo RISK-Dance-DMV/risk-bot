@@ -74,7 +74,7 @@ import {
   grantExtension,
   carryAsPractice,
   grantMembership,
-  markFeedbackRead,
+  takePractice,
   panelContext,
   noteRound,
   planStart,
@@ -339,20 +339,12 @@ async function runSubcommand(
 
   if (sub === "register") {
     const cohort = await cohortOf(env, interaction);
-    const planned = option(interaction, "register", "plan").trim();
-    if (planned && !/^\d{4}-\d{2}-\d{2}$/.test(planned)) {
-      return {
-        content:
-          "❌ Give the date as YYYY-MM-DD, e.g. `2026-11-29`. It's only an " +
-          "estimate — you can change it by running this again.",
-      };
-    }
     const result = await register(
       env,
       userId,
       displayNameOf(interaction),
       cohort,
-      planned || undefined,
+      option(interaction, "register", "cover") || undefined,
       timeline,
       policy,
       now,
@@ -644,12 +636,12 @@ export async function handleDiamondsComponent(
   const DANCER_ACTIONS: DiamondsAction[] = [
     "start",
     "quit",
-    "read",
     "submit",
     "submit-save",
     "plan",
     "plan-save",
     "leave",
+    "practice",
   ];
   if (!DANCER_ACTIONS.includes(action)) {
     if (!isDirector(await getDirectorIds(env), userId)) {
@@ -884,32 +876,37 @@ export async function handleDiamondsComponent(
     return json({ type: InteractionResponseType.DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE, data: { flags: 64 } });
   }
 
-  if (action === "read") {
-    // Replaces the notice with the document, so the button can't sit there
-    // looking unpressed next to the thing it opened. Pressing it again on an
-    // old notice is harmless — `markFeedbackRead` is idempotent and re-shows
-    // the document, which is what someone scrolling back actually wants.
+  // Taking the practice offer on a Round 0 fail. Replaces the offer with their
+  // Round 1 panel, so the next thing they see is the thing they just asked for.
+  if (action === "practice") {
     ctx.waitUntil(
       (async () => {
         let payload: MessagePayload;
         try {
           const now = new Date();
-          const { policy } = await context(env);
-          const result = await markFeedbackRead(env, userId, policy, now);
-          payload = result.ok
-            ? { ...result.payload!, components: [] }
-            : { content: `❌ ${result.reason}`, components: [] };
+          const { ctx: panel } = await context(env);
+          const result = await takePractice(env, userId);
+          if (!result.ok) {
+            payload = { content: `❌ ${result.reason}`, components: [] };
+          } else {
+            // Their Round 1 panel, with a line above it. One message rather
+            // than two: the panel is the answer to "what happens now", and a
+            // confirmation beside it would be the same news twice.
+            const panelNow = roundPanel(result.record, 1, panel, now);
+            payload = {
+              ...panelNow,
+              content:
+                `📝 **You're down for Rounds 1 and 2 as practice.** Round 0's ` +
+                `result doesn't change, and nothing from here is judged.\n\n` +
+                `${panelNow.content ?? ""}`,
+            };
+          }
         } catch (err) {
           payload = {
             content: `That didn't go through: ${err instanceof Error ? err.message : String(err)}`,
           };
         }
-        await editOriginalResponse(
-          env,
-          interaction.application_id,
-          interaction.token,
-          payload,
-        );
+        await editOriginalResponse(env, interaction.application_id, interaction.token, payload);
       })(),
     );
     return json({ type: InteractionResponseType.DEFERRED_UPDATE_MESSAGE });

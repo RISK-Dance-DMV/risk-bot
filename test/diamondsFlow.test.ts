@@ -108,7 +108,6 @@ import {
   carryAsPractice,
   extendRun,
   fileFeedback,
-  markFeedbackRead,
   getRecord,
   grantExtension,
   grantMembership,
@@ -121,6 +120,7 @@ import {
   sendResult,
   startWindow,
   submit,
+  takePractice,
   withdraw,
 } from "../src/diamonds/flow";
 import type { Env } from "../src/env";
@@ -269,7 +269,6 @@ const feedbackSent = (at = "2026-11-18T00:00:00.000Z") => ({
   writtenBy: "d1",
   submittedAt: at,
   deliveredAt: at,
-  readAt: at,
 });
 /** A sweep that said nothing to anybody. */
 /** The roster order the composed feedback follows. */
@@ -287,6 +286,8 @@ const quiet = {
   lapsed: 0,
   blocked: 0,
 };
+/** A Round 0 cover, since registering is sending one. */
+const COVER = "https://cover.example/ada";
 const OPEN = new Date("2026-11-18T00:00:00Z");
 /** The morning after, when they open the document. */
 const REVIEWED = new Date("2026-11-19T09:00:00Z");
@@ -379,23 +380,47 @@ describe("setting the timeline before the flag goes on", () => {
 describe("registering", () => {
   it("is idempotent, and reads as being on the list rather than an error", async () => {
     const { env } = envWith();
-    await register(env, "100", "Ada", "new", "2026-11-29", TIMELINE, POLICY, OPEN);
-    const second = await register(env, "100", "Ada L", "new", undefined, TIMELINE, POLICY, OPEN);
+    await register(env, "100", "Ada", "new", COVER, TIMELINE, POLICY, OPEN);
+    const second = await register(env, "100", "Ada L", "new", COVER, TIMELINE, POLICY, OPEN);
     expect(second.ok).toBe(true);
     expect(second.ok && second.record.displayName).toBe("Ada L");
-    // Leaving the estimate off keeps whatever was there rather than clearing it.
-    expect(second.ok && roundOf(second.record, 0).plannedStartAt).toBe("2026-11-29");
+    // The cover from the first run stands; the second doesn't replace it.
+    expect(second.ok && roundOf(second.record, 0).submittedAt).toBe(OPEN.toISOString());
   });
 
   /**
-   * The estimate is the only way to see the review load coming: rolling rounds
-   * spread two months of reviewing across a stream instead of one date.
+   * Registering *is* the Round 0 submission, so there is no longer a gap
+   * between putting your name down and sending something — which was the state
+   * people went quiet in.
    */
-  it("keeps an updated estimate, against Round 0", async () => {
+  it("records the cover as the submission", async () => {
     const { env } = envWith();
-    await register(env, "100", "Ada", "new", "2026-11-29", TIMELINE, POLICY, OPEN);
-    await register(env, "100", "Ada", "new", "2026-12-06", TIMELINE, POLICY, OPEN);
-    expect(roundOf((await getRecord(env, "100"))!, 0).plannedStartAt).toBe("2026-12-06");
+    const first = await register(env, "100", "Ada", "new", COVER, TIMELINE, POLICY, OPEN);
+    expect(first.ok && roundOf(first.record, 0).submissionUrl).toBe(COVER);
+    expect(first.ok && roundOf(first.record, 0).submittedAt).toBe(OPEN.toISOString());
+  });
+
+  it("refuses a newcomer with no cover, and says what one is", async () => {
+    const { env } = envWith();
+    const result = await register(env, "100", "Ada", "new", undefined, TIMELINE, POLICY, OPEN);
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.reason).toMatch(/needs a link/);
+    expect(result.ok === false && result.reason).toMatch(/last six months/);
+  });
+
+  it("refuses something that isn't a link", async () => {
+    const { env } = envWith();
+    expect(
+      (await register(env, "100", "Ada", "new", "my google drive", TIMELINE, POLICY, OPEN)).ok,
+    ).toBe(false);
+  });
+
+  /** A returning Diamond owes no cover, so they need pass nothing. */
+  it("takes a returning Diamond with nothing at all", async () => {
+    const { env } = envWith();
+    const result = await register(env, "100", "Ada", "returning", undefined, TIMELINE, POLICY, OPEN);
+    expect(result.ok).toBe(true);
+    expect(result.ok && roundOf(result.record, 0).submittedAt).toBeUndefined();
   });
 
   it("doesn't touch a round that's already under way", async () => {
@@ -404,7 +429,7 @@ describe("registering", () => {
         seed(dancer({ rounds: { 1: { assignedPiece: "https://p", windowOpenedAt: "x" } } })),
       ]),
     );
-    await register(env, "100", "Ada", "new", undefined, TIMELINE, POLICY, OPEN);
+    await register(env, "100", "Ada", "new", COVER, TIMELINE, POLICY, OPEN);
     expect(roundOf((await getRecord(env, "100"))!, 1).windowOpenedAt).toBe("x");
   });
 
@@ -417,17 +442,17 @@ describe("registering", () => {
   it("takes a newcomer long after the old close date", async () => {
     const { env } = envWith();
     const later = new Date("2027-02-01T00:00:00Z");
-    expect((await register(env, "100", "Ada", "new", undefined, TIMELINE, POLICY, later)).ok).toBe(
+    expect((await register(env, "100", "Ada", "new", COVER, TIMELINE, POLICY, later)).ok).toBe(
       true,
     );
   });
 
   it("holds someone who withdrew to the wait, same as a failure", async () => {
     const { env } = envWith(Object.fromEntries([seed(dancer())]));
-    await register(env, "100", "Ada", "new", undefined, TIMELINE, POLICY, OPEN);
+    await register(env, "100", "Ada", "new", COVER, TIMELINE, POLICY, OPEN);
     await withdraw(env, "100");
 
-    const back = await register(env, "100", "Ada", "new", undefined, TIMELINE, POLICY, OPEN);
+    const back = await register(env, "100", "Ada", "new", COVER, TIMELINE, POLICY, OPEN);
     expect(back.ok).toBe(false);
     expect(back.ok === false && back.reason).toMatch(/6-month wait/);
     expect((await getRecord(env, "100"))?.withdrawnAt).toBeTruthy();
@@ -983,7 +1008,7 @@ describe("registering again", () => {
     const { env } = envWith(Object.fromEntries([seed(finished())]));
     const again = new Date("2027-06-01T12:00:00Z");
 
-    const result = await register(env, "100", "Ada", "new", undefined, TIMELINE, POLICY, again);
+    const result = await register(env, "100", "Ada", "new", COVER, TIMELINE, POLICY, again);
     expect(result.ok).toBe(true);
 
     const stored = (await getRecord(env, "100"))!;
@@ -1038,7 +1063,7 @@ describe("registering again", () => {
   /** Round 0 for a renewing member is the application and current feedback. */
   it("asks a renewing member for nothing and opens their feedback", async () => {
     const { env } = envWith(Object.fromEntries([seed(finished())]));
-    await register(env, "100", "Ada", "new", undefined, TIMELINE, POLICY, new Date("2027-06-01T12:00:00Z"));
+    await register(env, "100", "Ada", "new", COVER, TIMELINE, POLICY, new Date("2027-06-01T12:00:00Z"));
     const stored = (await getRecord(env, "100"))!;
 
     expect((await submit(env, "100", 0, "https://nope", TIMELINE, POLICY, new Date("2027-06-02T12:00:00Z"))).ok).toBe(false);
@@ -1373,7 +1398,7 @@ describe("registering inside the wait", () => {
   it("refuses, and says when they can", async () => {
     const { env } = envWith(Object.fromEntries([seed(failed())]));
     const result = await register(
-      env, "100", "Ada", "new", undefined, TIMELINE, POLICY,
+      env, "100", "Ada", "new", COVER, TIMELINE, POLICY,
       new Date("2027-01-10T12:00:00Z"),
     );
     expect(result.ok).toBe(false);
@@ -1384,7 +1409,7 @@ describe("registering inside the wait", () => {
   it("lets them in once it's run out", async () => {
     const { env } = envWith(Object.fromEntries([seed(failed())]));
     const result = await register(
-      env, "100", "Ada", "new", undefined, TIMELINE, POLICY,
+      env, "100", "Ada", "new", COVER, TIMELINE, POLICY,
       new Date("2027-05-21T12:00:00Z"),
     );
     expect(result.ok).toBe(true);
@@ -1395,7 +1420,7 @@ describe("registering inside the wait", () => {
   it("doesn't archive the audition it's counted from", async () => {
     const { env } = envWith(Object.fromEntries([seed(failed())]));
     await register(
-      env, "100", "Ada", "new", undefined, TIMELINE, POLICY,
+      env, "100", "Ada", "new", COVER, TIMELINE, POLICY,
       new Date("2027-01-10T12:00:00Z"),
     );
     const stored = (await getRecord(env, "100"))!;
@@ -1433,18 +1458,20 @@ describe("registering inside the wait", () => {
       ]),
     );
     const soon = await register(
-      env, "100", "Ada", "new", undefined, TIMELINE, POLICY,
+      env, "100", "Ada", "new", COVER, TIMELINE, POLICY,
       new Date("2026-12-02T12:00:00Z"),
     );
     expect(soon.ok).toBe(false);
 
     const later = await register(
-      env, "100", "Ada", "new", undefined, TIMELINE, POLICY,
+      env, "100", "Ada", "new", COVER, TIMELINE, POLICY,
       new Date("2027-06-02T12:00:00Z"),
     );
     expect(later.ok).toBe(true);
-    // And it starts a new audition rather than resuming the dropped one.
-    expect((await getRecord(env, "100"))?.rounds).toEqual({});
+    // And it starts a new audition rather than resuming the dropped one: the
+    // only thing in `rounds` is the cover they just sent with the registration.
+    expect(Object.keys((await getRecord(env, "100"))!.rounds)).toEqual(["0"]);
+    expect(roundOf((await getRecord(env, "100"))!, 0).submissionUrl).toBe(COVER);
     expect((await getRecord(env, "100"))?.history).toHaveLength(1);
     expect((await getRecord(env, "100"))?.cohort).toBe("new");
   });
@@ -1615,7 +1642,7 @@ describe("a failed renewal, start to finish", () => {
     await runDiamondsSweep(env, TIMELINE, POLICY, new Date("2029-01-01T12:00:00Z"));
 
     const early = await register(
-      env, "100", "Ada", "new", undefined, TIMELINE, POLICY,
+      env, "100", "Ada", "new", COVER, TIMELINE, POLICY,
       new Date("2029-02-01T12:00:00Z"),
     );
     expect(early.ok).toBe(false);
@@ -1628,16 +1655,17 @@ describe("a failed renewal, start to finish", () => {
     await runDiamondsSweep(env, TIMELINE, POLICY, new Date("2029-01-01T12:00:00Z"));
 
     const back = await register(
-      env, "100", "Ada", "new", undefined, TIMELINE, POLICY,
+      env, "100", "Ada", "new", COVER, TIMELINE, POLICY,
       new Date("2029-04-21T12:00:00Z"),
     );
     expect(back.ok).toBe(true);
 
     const stored = (await getRecord(env, "100"))!;
-    expect(stored.rounds).toEqual({});
     expect(stored.history).toHaveLength(2);
-    // Failed, so a newcomer again: this time they owe us a cover.
+    // Failed, so a newcomer again — which is why that registration needed a
+    // cover, and why the new audition already has one in.
     expect(stored.cohort).toBe("new");
+    expect(Object.keys(stored.rounds)).toEqual(["0"]);
     expect(stored.memberSince).toBeUndefined();
   });
 
@@ -1661,7 +1689,7 @@ describe("a failed renewal, start to finish", () => {
     const { env } = envWith({ ...ROLE, ...Object.fromEntries([seed(early)]) });
 
     const back = await register(
-      env, "100", "Ada", "new", undefined, TIMELINE, POLICY,
+      env, "100", "Ada", "new", COVER, TIMELINE, POLICY,
       new Date("2028-08-16T12:00:00Z"),
     );
     expect(back.ok).toBe(true);
@@ -1818,10 +1846,10 @@ describe("starting a window", () => {
    * The whole ordering, end to end: a cover, feedback, a piece, a start. The
    * feedback is the gate, so the piece can't even be put up before it.
    */
-  it("runs cover -> score -> feedback -> read -> piece -> start, in that order", async () => {
+  it("runs cover -> score -> feedback -> piece -> read -> start, in that order", async () => {
     const { env } = envWith();
     const joined = new Date("2026-11-16T10:00:00Z");
-    await register(env, "100", "Ada", "new", undefined, TIMELINE, POLICY, joined);
+    await register(env, "100", "Ada", "new", COVER, TIMELINE, POLICY, joined);
     await submit(env, "100", 0, "https://cover", TIMELINE, POLICY, joined);
 
     const doc = {
@@ -1842,29 +1870,20 @@ describe("starting a window", () => {
     const second = await scoreRound(env, "100", "d2", { verdict: "pass" }, POLICY, reviewed);
     expect(second.ok && second.settled?.outcome).toBe("passed");
 
-    // The second verdict is what releases the held document, so Round 1 opens
-    // without anyone having to remember to file it again.
-    expect(second.ok && second.record.document?.deliveredAt).toBe(reviewed.toISOString());
+    // Two verdicts are no longer enough to release a pass: it waits for the
+    // piece as well, so the one message they get has everything behind it.
+    expect(second.ok && second.record.document?.deliveredAt).toBeUndefined();
+    expect(second.ok && second.warning).toMatch(/piece is up/);
 
-    // A piece can go up before they've opened it — that's a director's job and
-    // it shouldn't wait on a dancer's inbox. Starting the window can't.
-    expect(
-      (await assignPiece(env, "100", 1, "https://piece", TARGET, TIMELINE, POLICY, reviewed)).ok,
-    ).toBe(true);
-    const tooSoon = await startWindow(
-      env,
-      "100",
-      1,
-      TIMELINE,
-      POLICY,
-      new Date("2026-11-18T11:00:00Z"),
-    );
-    expect(tooSoon.ok).toBe(false);
-    expect(!tooSoon.ok && tooSoon.reason).toMatch(/in your DMs/);
+    // The piece is what sends it.
+    const up = await assignPiece(env, "100", 1, "https://piece", TARGET, TIMELINE, POLICY, reviewed);
+    expect(up.ok).toBe(true);
+    expect(up.ok && up.record.document?.deliveredAt).toBe(reviewed.toISOString());
 
-    await markFeedbackRead(env, "100", POLICY, new Date("2026-11-18T12:00:00Z"));
+    // And the start button on that message works the moment it lands — there is
+    // no step between the pass and the piece any more.
     expect(
-      (await startWindow(env, "100", 1, TIMELINE, POLICY, new Date("2026-11-18T13:00:00Z"))).ok,
+      (await startWindow(env, "100", 1, TIMELINE, POLICY, new Date("2026-11-18T11:00:00Z"))).ok,
     ).toBe(true);
   });
 });
@@ -2100,11 +2119,11 @@ describe("the daily sweep", () => {
    * key off and no piece to wait on.
    */
   /**
-   * Counted from their registration now rather than back from a cliff, which is
-   * the only honest version of this message once nothing closes: "you put your
-   * name down ten days ago and we've not seen anything".
+   * Only reachable through `/diamonds add` now — registering is sending the
+   * cover, so a dancer can't put themselves in this state. Kept because someone
+   * a director added is the person least likely to know what they owe.
    */
-  it("nudges a registration that never became a Round 0", async () => {
+  it("nudges somebody a director added who hasn't sent a cover", async () => {
     const { env } = envWith(Object.fromEntries([seed(dancer({ registeredAt: "2026-11-20T00:00:00.000Z" }))]));
     expect(
       await runDiamondsSweep(env, TIMELINE, POLICY, new Date("2026-11-29T00:00:00Z")),
@@ -2112,7 +2131,10 @@ describe("the daily sweep", () => {
 
     const due = new Date("2026-11-30T00:00:00Z");
     expect(await runDiamondsSweep(env, TIMELINE, POLICY, due)).toEqual({ ...quiet, round0: 1 });
-    expect(sendDirectMessage.mock.calls[0]![2].content!).toMatch(/haven't sent your Round 0/);
+    const said = sendDirectMessage.mock.calls[0]![2].content!;
+    expect(said).toMatch(/haven't got a cover from you/);
+    // Says why they didn't register themselves, because that's the confusing part.
+    expect(said).toMatch(/A director put you on/);
     expect(await runDiamondsSweep(env, TIMELINE, POLICY, due)).toEqual(quiet);
   });
 
@@ -2301,7 +2323,15 @@ describe("the Round 1 target", () => {
   it("only opens Round 1 once the feedback has actually reached them", async () => {
     sendDirectMessage.mockResolvedValueOnce(false);
     const { env } = envWith(
-      Object.fromEntries([seed(dancer({ cohort: "returning", rounds: { 0: bothPass() } }))]),
+      Object.fromEntries([
+        seed(
+          dancer({
+            cohort: "returning",
+            rounds: { 0: bothPass(), 1: { assignedPiece: "https://piece" } },
+            ...sealed,
+          }),
+        ),
+      ]),
     );
     const result = await fileFeedback(env, "100", doc, "d1", TIMELINE, POLICY, OPEN);
     expect(result.ok && result.warning).toMatch(/undelivered/);
@@ -2632,12 +2662,23 @@ describe("feedback, for either cohort", () => {
     );
   });
 
+  /**
+   * A pass with its Round 1 piece already up, which is what releases it. The
+   * piece going up is now the thing that sends the feedback, so a fixture
+   * without one is a document that is still correctly being held.
+   */
+  const ready = (over: Partial<DiamondsRecord> = {}) =>
+    dancer({
+      cohort: "returning",
+      rounds: { 0: bothPass(), 1: { assignedPiece: "https://piece" } },
+      ...sealed,
+      ...over,
+    });
+
   /** Delivery is the gate, so an undelivered one must not open anything. */
   it("leaves them in Round 0 when the DM fails, and says so", async () => {
     sendDirectMessage.mockResolvedValueOnce(false);
-    const { env } = envWith(
-      Object.fromEntries([seed(dancer({ cohort: "returning", rounds: { 0: bothPass() } }))]),
-    );
+    const { env } = envWith(Object.fromEntries([seed(ready())]));
     const result = await fileFeedback(env, "100", doc, "d1", TIMELINE, POLICY, OPEN);
     expect(result.ok && result.warning).toMatch(/has \*\*not\*\* opened/);
     const record = (await getRecord(env, "100"))!;
@@ -2650,48 +2691,31 @@ describe("feedback, for either cohort", () => {
    * first, because they are the part that's worth something either way.
    */
   /**
-   * Two steps, and the split between them is the point: the verdict goes out
-   * immediately and the document waits for them to open it. Round 0 is finished
-   * either way — what the read gates is Round 1.
+   * The pass arrives whole — verdict and reasons — and the button is for the
+   * next round rather than for the document. Nothing a dancer is owed sits
+   * behind a click; what they choose the moment of is opening Round 1.
    */
-  it("carries a pass out at once, and opens Round 1 when they read it", async () => {
-    const { env } = envWith(
-      Object.fromEntries([seed(dancer({ cohort: "returning", rounds: { 0: bothPass() } }))]),
-    );
+  it("sends the pass, the document and the start button as one message", async () => {
+    const { env } = envWith(Object.fromEntries([seed(ready())]));
     await fileFeedback(env, "100", doc, "d1", TIMELINE, POLICY, OPEN);
 
-    // The notice. Verdict yes, document no — nobody has to click to find out
-    // whether they're through.
-    const notice = sendDirectMessage.mock.calls[0]![2];
-    expect(notice.content!).toMatch(/you're through/i);
-    expect(notice.content!).not.toContain("clean lines");
-    expect(JSON.stringify(notice.components)).toContain("dia|read|me");
+    const sent = sendDirectMessage.mock.calls[0]![2];
+    expect(sent.content!).toMatch(/you're through to Round 1/i);
+    expect(sent.content!).toContain("clean lines");
 
+    // The real start button, not a step in front of it. Two earlier versions
+    // put a click between the pass and the piece; this is the one that was
+    // always going to matter.
+    expect(JSON.stringify(sent.components)).toContain("dia|start|1");
+    // And the warning that goes with it, because pressing it starts the clock.
+    expect(sent.content!).toMatch(/starts your clock/);
+    expect(sent.content!).toMatch(/no way to un-press it/);
+
+    // Round 1 is open on delivery now, so the button is live the moment it lands.
     const delivered = (await getRecord(env, "100"))!;
     expect(roundOf(delivered, 0).outcome).toBe("passed");
-    expect(roundOf(delivered, 0).resultSentAt).toBe(OPEN.toISOString());
-    // Still Round 0: the document is sitting there unopened.
-    expect(activeRound(delivered, OPEN)).toEqual({ ok: true, round: 0 });
-
-    const read = await markFeedbackRead(env, "100", POLICY, REVIEWED);
-    expect(read.ok && read.payload!.content!).toContain("clean lines");
-    expect(read.ok && read.payload!.content!).toMatch(/clock doesn't run until/);
-
-    const after = (await getRecord(env, "100"))!;
-    expect(after.document?.readAt).toBe(REVIEWED.toISOString());
-    expect(activeRound(after, REVIEWED)).toEqual({ ok: true, round: 1 });
-  });
-
-  /** Reading it twice shows it again and leaves the first read where it was. */
-  it("lets them re-read it without moving the date", async () => {
-    const { env } = envWith(
-      Object.fromEntries([seed(dancer({ cohort: "returning", rounds: { 0: bothPass() } }))]),
-    );
-    await fileFeedback(env, "100", doc, "d1", TIMELINE, POLICY, OPEN);
-    await markFeedbackRead(env, "100", POLICY, REVIEWED);
-    const again = await markFeedbackRead(env, "100", POLICY, LATER);
-    expect(again.ok && again.payload!.content!).toContain("clean lines");
-    expect((await getRecord(env, "100"))!.document?.readAt).toBe(REVIEWED.toISOString());
+    expect(activeRound(delivered, OPEN)).toEqual({ ok: true, round: 1 });
+    expect((await startWindow(env, "100", 1, TIMELINE, POLICY, REVIEWED)).ok).toBe(true);
   });
 
   /** A fail says so, keeps the feedback, and ends the audition rather than opening Round 1. */
@@ -2714,18 +2738,57 @@ describe("feedback, for either cohort", () => {
       ]),
     );
     await fileFeedback(env, "100", doc, "d1", TIMELINE, POLICY, OPEN);
-    const sent = sendDirectMessage.mock.calls[0]![2].content!;
-    expect(sent).toMatch(/not taking this one through/);
-    // The reasons are behind the button; the decision isn't.
-    expect(sent).not.toContain("clean lines");
+    const sent = sendDirectMessage.mock.calls[0]![2];
+    expect(sent.content!).toMatch(/not taking this one through/);
+
+    // Everything at once, unlike a pass. A pass holds the document because
+    // opening it starts Round 1; a fail opens nothing, so a button in front of
+    // the reasons would be a hoop for its own sake.
+    expect(sent.content!).toContain("clean lines");
+    // No start button either: there's no Round 1 for them to start.
+    expect(JSON.stringify(sent.components)).not.toContain("dia|start");
+
+    // And the offer to dance the rest anyway, which is theirs to take.
+    expect(JSON.stringify(sent.components)).toContain("dia|practice|me");
 
     const record = (await getRecord(env, "100"))!;
     expect(roundOf(record, 0).outcome).toBe("failed");
     expect(activeRound(record, OPEN).ok).toBe(false);
+  });
 
-    // And they can still read it, which is the part worth having.
-    const read = await markFeedbackRead(env, "100", POLICY, REVIEWED);
-    expect(read.ok && read.payload!.content!).toContain("clean lines");
+  /** Taking that offer puts two unjudged rounds after the fail. */
+  it("lets them dance the rest as practice after a fail", async () => {
+    const { env } = envWith(
+      Object.fromEntries([
+        seed(
+          dancer({
+            cohort: "returning",
+            document: feedbackSent(),
+            rounds: { 0: { resultSentAt: "a", outcome: "failed" } },
+          }),
+        ),
+      ]),
+    );
+    const taken = await takePractice(env, "100");
+    expect(taken.ok).toBe(true);
+    expect(taken.ok && taken.record.practiceFrom).toBe(1);
+
+    // Round 0's fail stands, and the audition carries on past it.
+    const after = (await getRecord(env, "100"))!;
+    expect(roundOf(after, 0).outcome).toBe("failed");
+    expect(activeRound(after, OPEN)).toEqual({ ok: true, round: 1 });
+
+    // Costs nothing: they can register for a real one whenever they like.
+    expect(
+      (await register(env, "100", "Ada", "returning", undefined, TIMELINE, POLICY, LATER)).ok,
+    ).toBe(true);
+  });
+
+  it("offers that to nobody else", async () => {
+    const { env } = envWith(Object.fromEntries([seed(ready())]));
+    const result = await takePractice(env, "100");
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.reason).toMatch(/isn't one/);
   });
 
   /**
@@ -2734,7 +2797,11 @@ describe("feedback, for either cohort", () => {
    * you're watching.
    */
   it("holds a document written before Round 0 was called", async () => {
-    const { env } = envWith(Object.fromEntries([seed(dancer({ cohort: "returning" }))]));
+    const { env } = envWith(
+      Object.fromEntries([
+        seed(dancer({ cohort: "returning", rounds: { 1: { assignedPiece: "https://piece" } }, ...sealed })),
+      ]),
+    );
     const held = await fileFeedback(env, "100", doc, "d1", TIMELINE, POLICY, OPEN);
     expect(held.ok && held.warning).toMatch(/held/);
     expect(sendDirectMessage).not.toHaveBeenCalled();
@@ -2742,6 +2809,22 @@ describe("feedback, for either cohort", () => {
     await scoreRound(env, "100", "d1", { verdict: "pass" }, POLICY, OPEN);
     const second = await scoreRound(env, "100", "d2", { verdict: "pass" }, POLICY, OPEN);
     expect(second.ok && second.record.document?.deliveredAt).toBe(OPEN.toISOString());
+  });
+
+  /** And holds a pass whose piece isn't up yet, which is the new wait. */
+  it("holds a decided pass until Round 1's piece is up", async () => {
+    const { env } = envWith(
+      Object.fromEntries([seed(dancer({ cohort: "returning", rounds: { 0: bothPass() } }))]),
+    );
+    const waiting = await fileFeedback(env, "100", doc, "d1", TIMELINE, POLICY, OPEN);
+    expect(waiting.ok && waiting.warning).toMatch(/piece is up/);
+    expect(sendDirectMessage).not.toHaveBeenCalled();
+
+    const up = await assignPiece(env, "100", 1, "https://piece", TARGET, TIMELINE, POLICY, REVIEWED);
+    expect(up.ok && up.record.document?.deliveredAt).toBe(REVIEWED.toISOString());
+    // One message, not two — the notice is what tells them the piece exists.
+    expect(sendDirectMessage).toHaveBeenCalledTimes(1);
+    expect(sendDirectMessage.mock.calls[0]![2].content!).toMatch(/piece is ready when you are/);
   });
 
   /** A split holds it too, and says which way each of them went. */
@@ -3107,7 +3190,7 @@ describe("practice, asked for at the door", () => {
   it("runs all three rounds with nothing decided in any of them", async () => {
     const { env } = envWith();
     const joined = new Date("2026-11-16T10:00:00Z");
-    await register(env, "100", "Ada", "new", undefined, TIMELINE, POLICY, joined, true);
+    await register(env, "100", "Ada", "new", COVER, TIMELINE, POLICY, joined, true);
     expect((await getRecord(env, "100"))!.practiceFrom).toBe(0);
 
     await submit(env, "100", 0, "https://cover", TIMELINE, POLICY, joined);
@@ -3120,7 +3203,6 @@ describe("practice, asked for at the door", () => {
     expect(roundOf(zero, 0).outcome).toBe("practice");
     expect(roundOf(zero, 0).ballots).toBeUndefined();
     // And it ends nothing: they're still going.
-    await markFeedbackRead(env, "100", POLICY, joined);
     expect(activeRound((await getRecord(env, "100"))!, joined)).toEqual({ ok: true, round: 1 });
 
     // Round 1 still gets scored, because the scores are what the feedback is
@@ -3180,7 +3262,7 @@ describe("practice, asked for at the door", () => {
     // And they can go again straight away — practice costs nothing, which is
     // the deal. A wait here would make asking for it the riskier choice.
     expect(
-      (await register(env, "100", "Ada", "new", undefined, TIMELINE, POLICY, new Date("2026-11-25T00:00:00Z"))).ok,
+      (await register(env, "100", "Ada", "new", COVER, TIMELINE, POLICY, new Date("2026-11-25T00:00:00Z"))).ok,
     ).toBe(true);
     const again = (await getRecord(env, "100"))!;
     expect(again.history).toHaveLength(1);
@@ -3285,7 +3367,7 @@ describe("carrying a failed Round 1 on as practice", () => {
       ]),
     );
     expect(
-      (await register(env, "100", "Ada", "new", undefined, TIMELINE, POLICY, new Date("2026-12-01T00:00:00Z"))).ok,
+      (await register(env, "100", "Ada", "new", COVER, TIMELINE, POLICY, new Date("2026-12-01T00:00:00Z"))).ok,
     ).toBe(true);
   });
 });
@@ -3370,12 +3452,12 @@ describe("the two-month clock", () => {
     const { env } = envWith(
       Object.fromEntries([seed(running({ expiredAt: "2027-01-16T12:00:00.000Z" }))]),
     );
-    const soon = await register(env, "100", "Ada", "new", undefined, TIMELINE, POLICY, new Date("2027-03-01T00:00:00Z"));
+    const soon = await register(env, "100", "Ada", "new", COVER, TIMELINE, POLICY, new Date("2027-03-01T00:00:00Z"));
     expect(soon.ok).toBe(false);
     expect(soon.ok === false && soon.reason).toMatch(/6-month wait/);
 
     expect(
-      (await register(env, "100", "Ada", "new", undefined, TIMELINE, POLICY, new Date("2027-07-20T00:00:00Z"))).ok,
+      (await register(env, "100", "Ada", "new", COVER, TIMELINE, POLICY, new Date("2027-07-20T00:00:00Z"))).ok,
     ).toBe(true);
   });
 
@@ -3387,7 +3469,7 @@ describe("the two-month clock", () => {
       ]),
     );
     expect(
-      (await register(env, "100", "Ada", "new", undefined, TIMELINE, POLICY, new Date("2027-02-01T00:00:00Z"))).ok,
+      (await register(env, "100", "Ada", "new", COVER, TIMELINE, POLICY, new Date("2027-02-01T00:00:00Z"))).ok,
     ).toBe(true);
   });
 
@@ -3471,7 +3553,7 @@ describe("the two-month clock", () => {
       expect(sendDirectMessage.mock.calls[0]![2].content!).toMatch(/open again/);
       // And the wait it was charging is gone with it.
       expect(
-        (await register(env, "100", "Ada", "new", undefined, TIMELINE, POLICY, new Date("2027-01-19T00:00:00Z"))).ok,
+        (await register(env, "100", "Ada", "new", COVER, TIMELINE, POLICY, new Date("2027-01-19T00:00:00Z"))).ok,
       ).toBe(true);
     });
 
@@ -3641,5 +3723,76 @@ describe("a date that lands mid-audition", () => {
     });
     const run = await runDiamondsSweep(env, TIMELINE, POLICY, new Date("2029-01-07T12:00:00Z"));
     expect(run.lapsed).toBe(1);
+  });
+});
+
+/**
+ * The clock measures the dancer's half of the process.
+ *
+ * Both of these are about the same hole: the 60 days used to include the
+ * directors' turnaround, so a submission on day 58 could expire while the only
+ * outstanding work was two people watching a video.
+ */
+describe("whose time the clock is counting", () => {
+  const JOINED = "2026-11-16T00:00:00.000Z";
+
+  it("stops once Round 2 is in, however long the review takes", () => {
+    const submitted = dancer({
+      registeredAt: JOINED,
+      document: feedbackSent(),
+      rounds: {
+        0: zeroPassed(),
+        1: { submittedAt: "a", resultSentAt: "b", outcome: "advanced" },
+        2: { submittedAt: "2027-01-14T00:00:00.000Z" },
+      },
+      ...sealed,
+    });
+    // Day 59 of 60, then two months later. Neither expires: they owe nothing.
+    expect(runExpired(submitted, 60, new Date("2027-01-14T12:00:00Z"))).toBe(false);
+    expect(runExpired(submitted, 60, new Date("2027-03-14T12:00:00Z"))).toBe(false);
+  });
+
+  it("keeps running while the next move is theirs", () => {
+    const waiting = dancer({
+      registeredAt: JOINED,
+      document: feedbackSent(),
+      rounds: { 0: zeroPassed(), 1: { assignedPiece: "https://p" } },
+      ...sealed,
+    });
+    expect(runExpired(waiting, 60, new Date("2027-01-16T12:00:00Z"))).toBe(true);
+  });
+
+  /**
+   * And the directors get told when they're the ones holding it up. Daily
+   * rather than once, because unlike every dancer-facing message here this is
+   * about work still outstanding — it stops when the list empties.
+   */
+  it("tells the directors what they owe beyond the promised turnaround", async () => {
+    const { env } = envWith(
+      Object.fromEntries([
+        // Submitted eight days ago against a five-day promise.
+        seed(dancer({ discordId: "1", registeredAt: JOINED, rounds: { 0: { submittedAt: "2026-11-20T00:00:00.000Z" } } })),
+        // And one from yesterday, which is not late.
+        seed(dancer({ discordId: "2", registeredAt: JOINED, rounds: { 0: { submittedAt: "2026-11-27T00:00:00.000Z" } } })),
+      ]),
+    );
+    await runDiamondsSweep(env, TIMELINE, POLICY, new Date("2026-11-28T12:00:00Z"));
+
+    const alert = alertDirectors.mock.calls.at(-1)![1];
+    expect(alert).toMatch(/1 waiting on a ballot/);
+    expect(alert).toContain("<@1>");
+    expect(alert).not.toContain("<@2>");
+    // Names the stake, because the dancer's clock is still running.
+    expect(alert).toMatch(/60 days keep running/);
+  });
+
+  it("says nothing on a morning when nothing is late", async () => {
+    const { env } = envWith(
+      Object.fromEntries([
+        seed(dancer({ registeredAt: JOINED, rounds: { 0: { submittedAt: "2026-11-27T00:00:00.000Z" } } })),
+      ]),
+    );
+    await runDiamondsSweep(env, TIMELINE, POLICY, new Date("2026-11-28T12:00:00Z"));
+    expect(alertDirectors).not.toHaveBeenCalled();
   });
 });
