@@ -238,7 +238,11 @@ async function checkRoleHierarchy(
   const top = mine.reduce((max, r) => Math.max(max, r.position), 0);
 
   let anyBlocked = false;
-  for (const key of ["hearts", "spades", "clubs"]) {
+  // `diamonds` is in here because the bot both assigns it on a pass and takes
+  // it off when a membership lapses, so the hierarchy check matters twice over:
+  // a bot sitting below that role fails silently in both directions, and the
+  // lapse path deliberately records nothing when it can't act.
+  for (const key of ["hearts", "spades", "clubs", "diamonds"]) {
     const id = kv(`config:role.${key}`);
     if (!id) {
       warn(`config:role.${key} not set — a pass into it can't assign anything`);
@@ -261,6 +265,19 @@ async function checkRoleHierarchy(
     console.log(
       `  → Server Settings → Roles → drag the bot's role above them (it's at ${top}).`,
     );
+  }
+
+  // Presence only, no hierarchy: the bot reads this role to decide who is
+  // exempt from the renewal ladder and never assigns it. Unset means nobody is
+  // exempt, which is the safe direction but not the intended one — the two
+  // directors would get chased about renewals they are the judges of.
+  const judge = kv("config:role.diamonds_director");
+  if (!judge) {
+    warn("config:role.diamonds_director not set — nobody is exempt from renewal notices");
+  } else if (!byId.get(judge)) {
+    fail(`config:role.diamonds_director is ${judge}, which isn't a role in the dance server`);
+  } else {
+    ok(`${byId.get(judge)!.name} are exempt from the renewal ladder`);
   }
 }
 
