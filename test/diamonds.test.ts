@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   ANCHOR_STEP,
   advancesRound1,
+  targetToBeat,
   activeRound,
   ballotComplete,
   ballotSplits,
@@ -9,17 +10,12 @@ import {
   roundToScore,
   settleRound,
   tally,
-  canSubmitRound0,
-  daysStillNeeded,
   feedbackReady,
-  lastRound0At,
-  roomForThreeRounds,
+  feedbackUnread,
   canSubmit,
   DIMENSIONS,
-  lastStartAt,
   meanScore,
   needsReminder,
-  needsStartNudge,
   notableCount,
   notYetStarted,
   pieceReady,
@@ -33,7 +29,6 @@ import {
   windowClosesAt,
   windowState,
   awaitingDelivery,
-  canFileDocument,
   DEFAULT_WEIGHTS,
   fixTarget,
   validateDocument,
@@ -113,12 +108,6 @@ describe("the window", () => {
     expect(windowState(open, WINDOW, at("2026-12-04T08:59:00.000Z"))).toBe("open");
     expect(windowState(open, WINDOW, at("2026-12-04T09:00:00.000Z"))).toBe("lapsed");
   });
-
-  it("counts back from the deadline to find the last possible start", () => {
-    expect(lastStartAt(CLOSES, WINDOW)).toBe(
-      "2026-12-10T00:00:00.000Z",
-    );
-  });
 });
 
 describe("what someone can do without a director present", () => {
@@ -130,24 +119,12 @@ describe("what someone can do without a director present", () => {
 
   it("lets them start once a piece is up", () => {
     expect(
-      canStartWindow(withRound2(entry()), 2, CLOSES, WINDOW, at("2026-11-23T10:00:00.000Z")),
-    ).toEqual({ ok: true });
-  });
-
-  it("refuses a start too late to shut before auditions close", () => {
-    const check = canStartWindow(withRound2(entry()), 2, CLOSES, WINDOW, at("2026-12-11T00:00:00.000Z"));
-    expect(check.ok).toBe(false);
-    if (!check.ok) expect(check.reason).toContain("wouldn't shut before");
-  });
-
-  it("allows a start on the last possible day", () => {
-    expect(
-      canStartWindow(withRound2(entry()), 2, CLOSES, WINDOW, at("2026-12-10T00:00:00.000Z")),
+      canStartWindow(withRound2(entry()), 2, WINDOW, at("2026-11-23T10:00:00.000Z")),
     ).toEqual({ ok: true });
   });
 
   it("refuses a second window once one is open", () => {
-    const check = canStartWindow(withRound2(entry({ windowOpenedAt: "2026-12-01T09:00:00.000Z" })), 2, CLOSES, WINDOW, at("2026-12-02T09:00:00.000Z"));
+    const check = canStartWindow(withRound2(entry({ windowOpenedAt: "2026-12-01T09:00:00.000Z" })), 2, WINDOW, at("2026-12-02T09:00:00.000Z"));
     expect(check.ok).toBe(false);
     if (!check.ok) expect(check.reason).toContain("already open");
   });
@@ -255,10 +232,63 @@ describe("Round 1 is a delta, not a bar", () => {
     expect(moved.because).toBe("improved");
   });
 
+  // At the bar the ask is to still have it, so this reads as "already there"
+  // rather than as an improvement. Nobody at 7.5 is being congratulated on
+  // movement they didn't need to make.
   it("advances someone already at the bar who nudged up", () => {
     const held = advancesRound1(7.5, 8.75, BAR, STEPS);
     expect(held.advanced).toBe(true);
-    expect(held.because).toBe("improved");
+    expect(held.because).toBe("already-there");
+  });
+
+  /**
+   * The curve, which is the whole rule: half the distance to the bar, floored
+   * at one anchor step, capped at the bar.
+   *
+   * Written as a table because the two properties that matter are properties of
+   * the whole shape rather than of any one row — the ask never rises as someone
+   * gets better, and it never exceeds the bar.
+   */
+  it("asks more of a worse start, and never asks anyone to beat the bar", () => {
+    const need = (before: number) => targetToBeat(before, BAR, STEPS);
+    expect([1, 2, 3, 4, 5, 6, 7, 7.5, 8.75].map(need)).toEqual([
+      4.25, // half of the 6.5 gap
+      4.75,
+      5.25,
+      5.75,
+      6.25,
+      7.25, // the one-step floor takes over here
+      7.5, // capped: the flat rule wanted 8.25, above the bar
+      7.5, // at the bar, hold
+      8.75,
+    ]);
+
+    // The ask, as an improvement, never goes up as the start gets better.
+    const asks = [1, 2, 3, 4, 5, 6, 7, 7.5].map((b) => need(b) - b);
+    for (let i = 1; i < asks.length; i += 1) {
+      expect(asks[i]!).toBeLessThanOrEqual(asks[i - 1]!);
+    }
+  });
+
+  /**
+   * The cliff the flat rule had, which this is the fix for: at 7 it demanded
+   * 8.25 — above the bar — while 7.5 only had to hold station, making just
+   * under the bar the hardest place on the scale to start.
+   */
+  it("no longer makes just-under-the-bar the hardest place to be", () => {
+    expect(advancesRound1(7, 7.5, BAR, STEPS).advanced).toBe(true);
+    expect(advancesRound1(7, 7.4, BAR, STEPS).advanced).toBe(false);
+    expect(targetToBeat(7, BAR, STEPS)).toBe(targetToBeat(7.5, BAR, STEPS));
+  });
+
+  /** And the number is reported, so a card can say what was asked. */
+  it("reports what they had to reach", () => {
+    expect(advancesRound1(3, 5.25, BAR, STEPS).needed).toBe(5.25);
+    expect(advancesRound1(3, 4, BAR, STEPS)).toMatchObject({
+      advanced: false,
+      needed: 5.25,
+      because: "no-movement",
+    });
   });
 
   it("advances someone already strong who held station", () => {
@@ -286,6 +316,12 @@ describe("Round 1 is a delta, not a bar", () => {
   it("is harsher when two steps are required", () => {
     expect(advancesRound1(5, 6.25, BAR, 2).advanced).toBe(false);
     expect(advancesRound1(5, 7.5, BAR, 2).advanced).toBe(true);
+  });
+
+  /** One anchor step is no longer enough from a long way out. */
+  it("doesn't let one step carry a weak start", () => {
+    expect(advancesRound1(2, 3.25, BAR, STEPS).advanced).toBe(false);
+    expect(advancesRound1(2, 4.75, BAR, STEPS).advanced).toBe(true);
   });
 });
 
@@ -328,31 +364,6 @@ describe("starting reveals the piece", () => {
   });
 });
 
-describe("never starting at all", () => {
-  const DEADLINE = "2026-12-13T00:00:00.000Z";
-
-  it("nudges as the last start date approaches", () => {
-    const waiting = entry();
-    // Last start is DEC 10; a 3-day nudge window opens DEC 7.
-    expect(needsStartNudge(waiting, DEADLINE, WINDOW, 3, at("2026-12-01T10:00:00.000Z"))).toBe(false);
-    expect(needsStartNudge(waiting, DEADLINE, WINDOW, 3, at("2026-12-08T10:00:00.000Z"))).toBe(true);
-  });
-
-  it("does not nudge without a piece, after starting, or twice", () => {
-    const now = at("2026-12-08T10:00:00.000Z");
-    expect(needsStartNudge({}, DEADLINE, WINDOW, 3, now)).toBe(false);
-    expect(
-      needsStartNudge(entry({ windowOpenedAt: "2026-12-07T10:00:00.000Z" }), DEADLINE, WINDOW, 3, now),
-    ).toBe(false);
-    expect(
-      needsStartNudge(entry({ startNudgedAt: "2026-12-07T10:00:00.000Z" }), DEADLINE, WINDOW, 3, now),
-    ).toBe(false);
-  });
-
-  it("stops nudging once the last start date has passed", () => {
-    expect(needsStartNudge(entry(), DEADLINE, WINDOW, 3, at("2026-12-11T10:00:00.000Z"))).toBe(false);
-  });
-});
 
 describe("Round 2's outcome is derived, so the bar can move", () => {
   const settled = scores({ performance: 6.25, musicality: 6.25 });
@@ -420,12 +431,6 @@ describe("the returning-member document", () => {
     const padded = validateDocument({ ...good, strengths: ["a", "  ", "b", "c", ""] });
     expect(padded.ok).toBe(true);
     if (padded.ok) expect(padded.strengths).toEqual(["a", "b", "c"]);
-  });
-
-  it("can be filed any time up to the pieces going up, and not after", () => {
-    const piecesUp = "2026-11-23T00:00:00.000Z";
-    expect(canFileDocument(piecesUp, at("2026-11-17T10:00:00.000Z")).ok).toBe(true);
-    expect(canFileDocument(piecesUp, at("2026-11-24T10:00:00.000Z")).ok).toBe(false);
   });
 });
 
@@ -584,17 +589,27 @@ describe("moving through the rounds at your own pace", () => {
     expect(activeRound(who(), now)).toEqual({ ok: true, round: 0 });
   });
 
-  it("opens Round 1 the moment their feedback lands, whenever that is", () => {
+  // The round turns on the *read*, not the send. Delivered-and-unopened is its
+  // own state, and it is the dancer's to leave: the document is the thing Round
+  // 1 is a response to, so until they have it there is nothing to respond to.
+  it("opens Round 1 the moment they open their feedback, whenever that is", () => {
+    const doc = {
+      content: "x",
+      strengths: ["a", "b", "c"],
+      growthAreas: ["arms"],
+      writtenBy: "d1",
+      submittedAt: "2026-11-17T00:00:00.000Z",
+      deliveredAt: "2026-11-17T00:00:00.000Z",
+    };
+    const unopened = who({
+      rounds: { 0: { submittedAt: "2026-11-16T00:00:00.000Z" } },
+      document: doc,
+    });
+    expect(activeRound(unopened, at("2026-11-17T00:01:00.000Z"))).toEqual({ ok: true, round: 0 });
+
     const early = who({
       rounds: { 0: { submittedAt: "2026-11-16T00:00:00.000Z" } },
-      document: {
-        content: "x",
-        strengths: ["a", "b", "c"],
-        growthAreas: ["arms"],
-        writtenBy: "d1",
-        submittedAt: "2026-11-17T00:00:00.000Z",
-        deliveredAt: "2026-11-17T00:00:00.000Z",
-      },
+      document: { ...doc, readAt: "2026-11-17T00:00:00.000Z" },
     });
     expect(activeRound(early, at("2026-11-17T00:01:00.000Z"))).toEqual({ ok: true, round: 1 });
     // And the same record a month later is still in Round 1 — no phase moved
@@ -603,7 +618,7 @@ describe("moving through the rounds at your own pace", () => {
   });
 
   /** A returning Diamond submits nothing, so the document *is* their Round 0. */
-  it("opens Round 1 for a returning Diamond when their feedback lands", () => {
+  it("opens Round 1 for a returning Diamond when they open their feedback", () => {
     const waiting = who({ cohort: "returning" });
     expect(activeRound(waiting, now)).toEqual({ ok: true, round: 0 });
 
@@ -616,6 +631,7 @@ describe("moving through the rounds at your own pace", () => {
         writtenBy: "d1",
         submittedAt: "2026-11-18T00:00:00.000Z",
         deliveredAt: "2026-11-18T00:00:00.000Z",
+        readAt: "2026-11-18T09:00:00.000Z",
       },
     });
     expect(activeRound(sent, now)).toEqual({ ok: true, round: 1 });
@@ -641,11 +657,31 @@ describe("moving through the rounds at your own pace", () => {
   });
 
   it("ends the audition on a round that didn't go their way", () => {
-    for (const outcome of ["practice", "failed"] as const) {
-      const done = activeRound(who({ rounds: { 1: { outcome } } }), now);
-      expect(done.ok).toBe(false);
-      expect(done.ok === false && done.reason).toMatch(/finished at Round 1/);
-    }
+    const done = activeRound(who({ rounds: { 1: { outcome: "failed" } } }), now);
+    expect(done.ok).toBe(false);
+    expect(done.ok === false && done.reason).toMatch(/finished at Round 1/);
+  });
+
+  /**
+   * And a practice round ends nothing, which is the point of it: somebody
+   * carried into Round 2 after a Round 1 fail is still going, and so is someone
+   * who asked for practice from the start.
+   */
+  it("keeps going after a practice round", () => {
+    const carried = who({
+      practiceFrom: 2,
+      document: {
+        content: "x",
+        strengths: ["a", "b", "c"],
+        growthAreas: ["arms"],
+        writtenBy: "d1",
+        submittedAt: "2026-11-18T00:00:00.000Z",
+        deliveredAt: "2026-11-18T00:00:00.000Z",
+        readAt: "2026-11-18T00:00:00.000Z",
+      },
+      rounds: { 1: { submittedAt: "x", resultSentAt: "y", outcome: "practice" } },
+    });
+    expect(activeRound(carried, now)).toEqual({ ok: true, round: 2 });
   });
 });
 
@@ -668,6 +704,7 @@ describe("Round 1 waits on the feedback", () => {
     writtenBy: "d1",
     submittedAt: at,
     deliveredAt: at,
+    readAt: at,
   });
 
   const who = (over: Partial<DiamondsRecord> = {}): DiamondsRecord => ({
@@ -681,7 +718,7 @@ describe("Round 1 waits on the feedback", () => {
   });
 
   it("refuses a start before the feedback has landed, and says it's not their fault", () => {
-    const check = canStartWindow(who(), 1, CLOSES, WINDOW, at("2026-11-19T00:00:00.000Z"));
+    const check = canStartWindow(who(), 1, WINDOW, at("2026-11-19T00:00:00.000Z"));
     expect(check.ok).toBe(false);
     if (!check.ok) {
       expect(check.reason).toMatch(/feedback hasn't reached you/);
@@ -694,7 +731,6 @@ describe("Round 1 waits on the feedback", () => {
       canStartWindow(
         who({ document: delivered() }),
         1,
-        CLOSES,
         WINDOW,
         at("2026-11-19T00:00:00.000Z"),
       ),
@@ -704,13 +740,39 @@ describe("Round 1 waits on the feedback", () => {
   /** Written but undelivered is not delivered — a failed DM blocks nothing open. */
   it("doesn't count feedback that never arrived", () => {
     const undelivered = who({
-      document: { ...delivered(), deliveredAt: undefined },
+      document: { ...delivered(), deliveredAt: undefined, readAt: undefined },
     });
     expect(feedbackReady(undelivered, 1).ok).toBe(false);
     expect(activeRound(undelivered, at("2026-11-19T00:00:00.000Z"))).toEqual({
       ok: true,
       round: 0,
     });
+  });
+
+  /**
+   * Delivered and unopened gets its own refusal, and the wording is the point:
+   * "hasn't reached you" sends someone to ask a director about a message that
+   * is already sitting in their DMs.
+   */
+  it("tells someone whose feedback is unopened where it is", () => {
+    const unread = who({ document: { ...delivered(), readAt: undefined } });
+    const check = feedbackReady(unread, 1);
+    expect(check.ok).toBe(false);
+    expect(check.ok === false && check.reason).toMatch(/in your DMs/);
+    expect(check.ok === false && check.reason).not.toMatch(/hasn't reached you/);
+  });
+
+  it("nudges an unopened document once, after the nudge window", () => {
+    const unread = who({ document: { ...delivered("2026-11-18T00:00:00.000Z"), readAt: undefined } });
+    expect(feedbackUnread(unread, 3, at("2026-11-20T00:00:00.000Z"))).toBe(false);
+    expect(feedbackUnread(unread, 3, at("2026-11-21T00:00:00.000Z"))).toBe(true);
+    // Once. A document is a thing you read when you're ready to.
+    const nudged = who({
+      document: { ...delivered("2026-11-18T00:00:00.000Z"), readAt: undefined, readNudgedAt: "2026-11-21T00:00:00.000Z" },
+    });
+    expect(feedbackUnread(nudged, 3, at("2026-11-25T00:00:00.000Z"))).toBe(false);
+    // And not at all once they've read it.
+    expect(feedbackUnread(who({ document: delivered("2026-11-18T00:00:00.000Z") }), 3, at("2026-11-25T00:00:00.000Z"))).toBe(false);
   });
 
   it("asks nothing of Rounds 0 and 2 — neither is a response to feedback", () => {
@@ -738,38 +800,6 @@ describe("Round 1 waits on the feedback", () => {
   });
 });
 
-describe("how long three rounds take", () => {
-  const POLICY = { windowDays: 3, reviewMaxDays: REVIEW_MAX };
-  const TIMELINE = {
-    opensAt: "2026-11-15T05:01:00.000Z",
-    closesAt: "2027-01-11T04:59:00.000Z",
-  };
-
-  /**
-   * Two reviews and two windows, and nothing else — there's no working gap to
-   * add any more, because the only waiting the process imposes is the
-   * reviewing. Time someone takes with their feedback is time they chose.
-   */
-  it("counts the reviewing and the windows, at the slow end", () => {
-    expect(daysStillNeeded(POLICY)).toBe(16);
-    expect(daysStillNeeded({ ...POLICY, reviewMaxDays: 1 })).toBe(8);
-  });
-
-  it("derives the last Round 0 that still fits, rather than configuring one", () => {
-    expect(lastRound0At(TIMELINE, POLICY)).toBe("2026-12-26T04:59:00.000Z");
-  });
-
-  /**
-   * A warning, not a refusal: anyone may audition for the feedback alone, and
-   * someone turning up in January knowing they can't finish is making a choice.
-   * What they shouldn't do is find out afterwards.
-   */
-  it("says when there's no longer room, without shutting the door", () => {
-    expect(roomForThreeRounds(TIMELINE, POLICY, at("2026-12-23T00:00:00.000Z"))).toBe(true);
-    expect(roomForThreeRounds(TIMELINE, POLICY, at("2026-12-30T00:00:00.000Z"))).toBe(false);
-    expect(canSubmitRound0(TIMELINE.closesAt, at("2026-12-30T00:00:00.000Z")).ok).toBe(true);
-  });
-});
 
 /**
  * Sealed ballots. The seal matters more with two directors than with three:
@@ -967,13 +997,49 @@ describe("settling a round", () => {
    * going after not advancing, so "didn't advance but is still in" has to be
    * representable.
    */
-  it("calls a Round 1 that didn't move practice, not failure", () => {
+  /**
+   * Not moving it is a fail, and the gentler ending is now a director's choice
+   * rather than a word the bot picks. The two used to be one outcome called
+   * "practice", which meant the audition was over and nobody could tell.
+   */
+  it("calls a Round 1 that didn't move a failure", () => {
     const stuck = settleRound(
       record({ rounds: { 1: { submittedAt: "x", ballots: ballots({ targetScore: 4.25 }) } } }),
       1,
       POLICY,
     );
-    expect(stuck?.outcome).toBe("practice");
+    expect(stuck?.outcome).toBe("failed");
+  });
+
+  /** And a round nobody was judging settles as practice, deciding nothing. */
+  it("settles a practice round as practice, with no verdict in it", () => {
+    const asked = record({
+      practiceFrom: 0,
+      rounds: { 1: { submittedAt: "x", ballots: ballots({ targetScore: 4.25 }) } },
+    });
+    expect(settleRound(asked, 1, POLICY)?.outcome).toBe("practice");
+    // Even a delta that would have advanced them: nothing is being decided.
+    const moved = record({
+      practiceFrom: 0,
+      rounds: { 1: { submittedAt: "x", ballots: ballots({ targetScore: 9 }) } },
+    });
+    expect(settleRound(moved, 1, POLICY)?.outcome).toBe("practice");
+  });
+
+  /** Round 0 practice settles on the document alone — there's no verdict. */
+  it("settles a practice Round 0 as soon as the feedback is written", () => {
+    expect(settleRound(record({ practiceFrom: 0 }), 0, POLICY)).toBeUndefined();
+    const written = record({
+      practiceFrom: 0,
+      document: {
+        content: "x",
+        strengths: ["a", "b", "c"],
+        growthAreas: ["arms"],
+        writtenBy: "d1",
+        submittedAt: "y",
+      },
+    });
+    expect(settleRound(written, 0, POLICY)?.outcome).toBe("practice");
   });
 
   it("won't settle Round 1 without the before-number that was fixed at assignment", () => {
@@ -1307,19 +1373,48 @@ describe("the renewal ladder", () => {
    * Nobody mid-re-audition gets told they're about to be removed — they are
    * doing the thing the notice asks for.
    */
+  /**
+   * A live re-audition is one registered since their membership started. The
+   * finished one it replaced is in `history`, so `rounds` is the new audition
+   * and only the dates say which term it belongs to.
+   */
   it("goes quiet while a re-audition is in flight", () => {
     const going = member({
+      registeredAt: "2028-11-20T00:00:00.000Z",
       rounds: { 0: { submittedAt: "2028-12-01T00:00:00.000Z" } },
     });
     expect(renewalUnderway(going)).toBe(true);
     expect(noticeDue(going, LADDER, new Date("2028-12-20T12:00:00Z"))).toBeUndefined();
   });
 
+  /** Registering counts, before they've submitted anything — the clock bounds it. */
+  it("counts a registration with nothing submitted yet", () => {
+    const signed = member({ registeredAt: "2028-11-20T00:00:00.000Z", rounds: {} });
+    expect(renewalUnderway(signed)).toBe(true);
+  });
+
   it("doesn't count the audition they joined on as a re-audition", () => {
     const joined = member({
+      registeredAt: "2027-10-01T00:00:00.000Z",
       rounds: { 2: { submittedAt: "2027-11-01T00:00:00.000Z", resultSentAt: "2027-11-15T00:00:00.000Z" } },
     });
     expect(renewalUnderway(joined)).toBe(false);
+  });
+
+  /** And stops counting the moment that re-audition ends, however it ended. */
+  it("stops counting once the re-audition is over", () => {
+    const base = { registeredAt: "2028-11-20T00:00:00.000Z" };
+    expect(renewalUnderway(member({ ...base, withdrawnAt: "2028-12-05T00:00:00.000Z", rounds: {} }))).toBe(
+      false,
+    );
+    expect(renewalUnderway(member({ ...base, expiredAt: "2029-01-20T00:00:00.000Z", rounds: {} }))).toBe(
+      false,
+    );
+    expect(
+      renewalUnderway(
+        member({ ...base, rounds: { 1: { submittedAt: "a", resultSentAt: "b", outcome: "failed" } } }),
+      ),
+    ).toBe(false);
   });
 
   it("counts whole days, so most of today still counts", () => {
@@ -1482,14 +1577,27 @@ describe("starting again", () => {
         true,
       ],
       [
-        "didn't advance at Round 1",
+        // Not advancing at Round 1 is a fail now. "practice" means a round that
+        // was never being judged, and one of those ends nothing.
+        "failed at Round 1",
         done({
+          rounds: {
+            0: done().rounds[0]!,
+            1: { submittedAt: "x", resultSentAt: "y", outcome: "failed" },
+          },
+        }),
+        true,
+      ],
+      [
+        "carried on into Round 2 as practice",
+        done({
+          practiceFrom: 2,
           rounds: {
             0: done().rounds[0]!,
             1: { submittedAt: "x", resultSentAt: "y", outcome: "practice" },
           },
         }),
-        true,
+        false,
       ],
       [
         "failed Round 0",
@@ -1534,8 +1642,18 @@ describe("the wait after an audition that didn't pass", () => {
   /** All three mean the same thing about whether they're in. */
   it("applies at whichever round it ended", () => {
     expect(retryBlockedUntil(ended("failed", 0), 6)).toBeTruthy();
-    expect(retryBlockedUntil(ended("practice", 1), 6)).toBeTruthy();
+    expect(retryBlockedUntil(ended("failed", 1), 6)).toBeTruthy();
     expect(retryBlockedUntil(ended("failed", 2), 6)).toBeTruthy();
+  });
+
+  /**
+   * And never after practice, which is the deal: someone who asked not to be
+   * judged hasn't failed anything. A wait here would make asking for practice
+   * the riskier choice of the two.
+   */
+  it("doesn't apply after a practice audition", () => {
+    expect(retryBlockedUntil(ended("practice", 1), 6)).toBeUndefined();
+    expect(retryBlockedUntil(ended("practice", 2), 6)).toBeUndefined();
   });
 
   it("doesn't apply to someone who passed", () => {

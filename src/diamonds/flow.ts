@@ -26,9 +26,11 @@
 import { getDirectorIds } from "../config/directors";
 import { isEnabled } from "../config/flags";
 import {
+  addRole,
   alertDirectors,
   editMessage,
   postToChannelByName,
+  memberRoles,
   removeRole,
   sendDirectMessage,
 } from "../discord/rest";
@@ -36,7 +38,6 @@ import type { MessagePayload } from "../discord/types";
 import type { Env } from "../env";
 import {
   ROUND_REVEAL,
-  canFileDocument,
   canStartWindow,
   canSubmit,
   ballotComplete,
@@ -45,9 +46,11 @@ import {
   auditionFinished,
   auditionResulted,
   retryBlocked,
+  runDaysLeft,
+  runEndsAt,
+  runExpired,
   membershipLapsed,
   withLapse,
-  canSubmitRound0,
   composeFeedback,
   enforcementFor,
   noticeDue,
@@ -55,13 +58,12 @@ import {
   documentReady,
   feedbackRevealed,
   feedbackReady,
-  lastStartAt,
-  lastRound0At,
+  feedbackSentOut,
+  feedbackUnread,
   needsPlanReminder,
   needsReminder,
   needsRound0Nudge,
   needsStartHeadsUp,
-  needsStartNudge,
   roundOf,
   roundToScore,
   fixTarget,
@@ -85,6 +87,7 @@ import {
 } from "./audition";
 import {
   cycleName,
+  feedbackArrived,
   resultMessage,
   reviewCard,
   roundPanel,
@@ -92,6 +95,7 @@ import {
   type ReviewOptions,
 } from "./card";
 import {
+  getDiamondDirectorRoleId,
   getDiamondsRoleId,
   getDiamondsTimeline,
   getDiamondsPolicy,
@@ -197,6 +201,16 @@ export async function register(
   timeline: DiamondsTimeline,
   policy: DiamondsPolicy,
   now: Date,
+  /**
+   * Practice from the start, if that's what they asked for.
+   *
+   * Asked at registration rather than offered later, because it changes what
+   * every round of theirs is for: a practice Round 0 has no verdict to wait on,
+   * and the whole run carries no consequence. Choosing it at the door is also
+   * the only point at which it's clearly a choice rather than a reaction to a
+   * score they didn't like.
+   */
+  practice = false,
 ): Promise<FlowResult> {
   const existing = await getRecord(env, discordId);
 
@@ -218,17 +232,6 @@ export async function register(
     };
   }
 
-  // Someone already on the list is never turned away by the clock — they'd be
-  // asking whether they're still in, and after the close they are.
-  if (!existing && now.getTime() > new Date(timeline.closesAt).getTime()) {
-    return {
-      ok: false,
-      reason:
-        "Auditions have closed, so registration is shut. Ask a director — a late " +
-        "entry is their call, not mine.",
-    };
-  }
-
   // Registering again is how you start again. One door rather than a second
   // command, because "put my name down for this audition" is the same sentence
   // the second time — and because a dancer who has finished and wants another
@@ -247,6 +250,12 @@ export async function register(
     : existing
       ? { ...existing, displayName, withdrawnAt: undefined }
       : { discordId, displayName, cohort, registeredAt: now.toISOString(), rounds: {} };
+
+  // Only ever set here, and only on: a registration that doesn't ask for
+  // practice leaves an existing choice alone rather than silently undoing it,
+  // because `/diamonds register` is also the "am I still on the list?" command
+  // and running it twice shouldn't change what someone signed up for.
+  if (practice) base.practiceFrom = 0;
 
   // The estimate given at registration is Round 0's. Later rounds get their own
   // through `/diamonds plan`, when the piece is actually in front of them.
@@ -332,7 +341,7 @@ export async function planStart(
   const record = await getRecord(env, discordId);
   if (!record) return { ok: false, reason: "You're not registered for this audition." };
 
-  const allowed = canPlanStart(record, round, timeline, policy, day.trim(), now);
+  const allowed = canPlanStart(record, round, day.trim(), now);
   if (!allowed.ok) return { ok: false, reason: allowed.reason };
 
   // Clears the reminder marker, so moving the date moves the reminder with it
@@ -367,7 +376,10 @@ export async function startWindow(
   const record = await getRecord(env, discordId);
   if (!record) return { ok: false, reason: "You're not registered for this audition." };
 
-  const allowed = canStartWindow(record, round, timeline.closesAt, policy.windowDays, now);
+  const expired = runOut(record, policy, now);
+  if (expired) return expired;
+
+  const allowed = canStartWindow(record, round, policy.windowDays, now);
   if (!allowed.ok) return { ok: false, reason: allowed.reason };
 
   const updated = withRound(record, round, { windowOpenedAt: now.toISOString() });
@@ -405,11 +417,13 @@ export async function submit(
     };
   }
 
+  const expired = runOut(record, policy, now);
+  if (expired) return expired;
+
   const entry = roundOf(record, round);
-  const allowed =
-    round === 0
-      ? canSubmitRound0(timeline.closesAt, now)
-      : canSubmit(entry, policy.windowDays, now);
+  // Round 0 has no window of its own — a cover is a thing you send when you
+  // have one — so the only clock on it is the two months for the whole run.
+  const allowed = round === 0 ? { ok: true as const } : canSubmit(entry, policy.windowDays, now);
   if (!allowed.ok) return { ok: false, reason: allowed.reason };
 
   const updated = withRound(record, round, {
@@ -644,7 +658,10 @@ export async function assignPiece(
   // The ordering the whole rule rests on: feedback first, then the piece. Round
   // 1 is a response to the feedback, so a piece assigned before it is a piece
   // nobody can start.
-  const ready = feedbackReady(record, round);
+  // Keyed to the document having *gone out*, not to their having opened it. A
+  // director shouldn't be held up by a dancer's inbox, and the piece is only
+  // revealed on start anyway — so it can sit there waiting for them.
+  const ready = feedbackSentOut(record, round);
   if (!ready.ok) {
     return {
       ok: false,
@@ -715,6 +732,9 @@ export function panelContext(
     reviewMaxDays: policy.reviewMaxDays,
     minScores: policy.minScores,
     retryMonths: policy.retryMonths,
+    bar: policy.bar,
+    requiredSteps: policy.requiredSteps,
+    runDays: policy.runDays,
   };
 }
 
@@ -798,6 +818,101 @@ export async function assignToAll(
     }
   }
   return { assigned, skipped, unreachable };
+}
+
+/**
+ * Days added to the whole two-month run, rather than to one round's window.
+ *
+ * The same command as a window extension because it is the same act — a
+ * director deciding somebody's circumstances warrant more time — and the two
+ * reasons people need it are indistinguishable from the outside: an injury
+ * eats a window *and* the run it sits in.
+ *
+ * **Works after the date has passed, and reopens the audition.** That is the
+ * whole point of having it: the refusal a dancer sees when the clock runs out
+ * says "talk to a director", and a director with no way to act on that would
+ * make the refusal a dead end with better manners. Clearing `expiredAt` puts
+ * them back exactly where they were, mid-round, rather than starting them over.
+ */
+export async function extendRun(
+  env: Env,
+  discordId: string,
+  days: number,
+  reason: string,
+  by: string,
+  policy: DiamondsPolicy,
+  now: Date,
+): Promise<FlowResult> {
+  if (!Number.isFinite(days) || days <= 0) {
+    return { ok: false, reason: "Days has to be a positive number." };
+  }
+  const record = await getRecord(env, discordId);
+  if (!record) {
+    return { ok: false, reason: `<@${discordId}> isn't registered for this audition.` };
+  }
+  if (!record.registeredAt) {
+    return {
+      ok: false,
+      reason:
+        `<@${discordId}>'s record predates the ${policy.runDays}-day clock, so they ` +
+        `don't have one to extend. Nothing is going to run out on them.`,
+    };
+  }
+  // A finished audition has no clock left to move. Said as two refusals because
+  // the two situations need different things from a director: a withdrawal or a
+  // verdict wants `/diamonds add`, and an expiry is what this is for.
+  if (auditionResulted(record) || record.withdrawnAt) {
+    return {
+      ok: false,
+      reason:
+        `<@${discordId}>'s audition is already over — ` +
+        `${record.withdrawnAt ? "they withdrew" : "the result has gone out"}. ` +
+        `More days won't restart it; \`/diamonds add\` will.`,
+    };
+  }
+
+  const extended: DiamondsRecord = {
+    ...record,
+    runExtensions: [
+      ...(record.runExtensions ?? []),
+      { days, reason, by, at: now.toISOString() },
+    ],
+    // Both cleared deliberately. `expiredAt` is what reopens a closed audition;
+    // `runWarnedAt` is so the ten-day warning can fire again against the new
+    // date, because an extension that silently costs them their warning is
+    // worse than no extension.
+    expiredAt: undefined,
+    runWarnedAt: undefined,
+  };
+
+  const ends = runEndsAt(extended, policy.runDays)!;
+  if (new Date(ends).getTime() <= now.getTime()) {
+    return {
+      ok: false,
+      reason:
+        `${days} day${days === 1 ? "" : "s"} still leaves them past the date — it ` +
+        `would be <t:${Math.floor(new Date(ends).getTime() / 1000)}:D>. Give them ` +
+        `enough to actually finish in.`,
+    };
+  }
+
+  await putRecord(env, extended);
+
+  const unix = Math.floor(new Date(ends).getTime() / 1000);
+  const reopened = !!record.expiredAt;
+  const reached = await sendDirectMessage(env, discordId, {
+    content: reopened
+      ? `⏳ **Your audition is open again** — you have until <t:${unix}:D> ` +
+        `(<t:${unix}:R>). ${days} extra day${days === 1 ? "" : "s"}, and you pick up ` +
+        `exactly where you left off.`
+      : `⏳ **You've got ${days} more day${days === 1 ? "" : "s"}** — all three rounds ` +
+        `by <t:${unix}:D> (<t:${unix}:R>) now.`,
+  });
+  return {
+    ok: true,
+    record: extended,
+    warning: reached ? undefined : `Couldn't DM <@${discordId}>.`,
+  };
 }
 
 export async function grantExtension(
@@ -894,9 +1009,6 @@ export async function fileFeedback(
     };
   }
 
-  const open = canFileDocument(timeline.closesAt, now);
-  if (!open.ok) return { ok: false, reason: open.reason };
-
   const checked = validateDocument(input);
   if (!checked.ok) return { ok: false, reason: checked.reason };
 
@@ -940,13 +1052,17 @@ export async function fileFeedback(
 }
 
 /**
- * Sends a written document and marks it delivered, or doesn't and says so.
+ * Sends the notice that a document exists, and marks it delivered.
  *
  * This is also how Round 0's result is sent, which is why it writes
- * `resultSentAt` and the outcome: the verdict travels inside the document
- * rather than beside it. Nothing is recorded unless the DM actually arrived —
- * a verdict nobody received hasn't been delivered, and marking Round 0 done on
- * a failed send would strand someone with a decision they were never told.
+ * `resultSentAt` and the outcome: the verdict goes out with the notice, so
+ * nobody has to click to find out whether they're through. What the click is
+ * for is the document, and **the click is what opens Round 1** — see
+ * `FeedbackDocument.readAt`.
+ *
+ * Nothing is recorded unless the DM actually arrived. A verdict nobody received
+ * hasn't been delivered, and marking Round 0 done on a failed send would strand
+ * someone with a decision they were never told.
  */
 async function deliverDocument(
   env: Env,
@@ -959,13 +1075,7 @@ async function deliverDocument(
   const reached = await sendDirectMessage(
     env,
     record.discordId,
-    feedbackMessage(
-      doc.content,
-      doc.strengths,
-      doc.growthAreas,
-      settled?.outcome === "passed",
-      policy,
-    ),
+    feedbackArrived(settled?.outcome === "passed", policy.windowDays),
   );
   if (!reached) return { record, reached };
   return {
@@ -987,7 +1097,7 @@ async function deliverDocument(
  * both directions, and it's the only part a dancer who didn't get through can
  * still use.
  */
-function feedbackMessage(
+export function feedbackMessage(
   content: string,
   strengths: readonly string[],
   growthAreas: readonly string[],
@@ -1013,6 +1123,144 @@ function feedbackMessage(
           `above is honest and worth having either way. Come back at us next ` +
           `cycle; we'd like you to.`),
   };
+}
+
+/**
+ * The two-month refusal, shared by starting and submitting.
+ *
+ * Says the date and points at a director, because by the time anyone reads this
+ * the only thing that can help is somebody with the power to add days — and
+ * they would much rather do that than have this be the end of it.
+ */
+function runOut(
+  record: DiamondsRecord,
+  policy: DiamondsPolicy,
+  now: Date,
+): { ok: false; reason: string } | undefined {
+  if (!runExpired(record, policy.runDays, now)) return undefined;
+  const ends = runEndsAt(record, policy.runDays)!;
+  const unix = Math.floor(new Date(ends).getTime() / 1000);
+  return {
+    ok: false,
+    reason:
+      `Your ${policy.runDays} days ran out on <t:${unix}:D>, so this audition is ` +
+      `closed. **Talk to a director** — they can add days or put you back on the ` +
+      `list, and they'd rather do that than lose you to a calendar.`,
+  };
+}
+
+/**
+ * Carrying someone into Round 2 as practice after a Round 1 fail.
+ *
+ * Writes the flag and nothing else — the result still goes out through
+ * `sendResult`, so the two of them read the exact words before anything
+ * reaches the dancer. Separate from sending on purpose: this changes what
+ * Round 2 *is*, and that's a decision worth its own click.
+ */
+export async function carryAsPractice(
+  env: Env,
+  discordId: string,
+  policy: DiamondsPolicy,
+): Promise<FlowResult> {
+  const record = await getRecord(env, discordId);
+  if (!record) {
+    return { ok: false, reason: `<@${discordId}> isn't registered for this audition.` };
+  }
+  if (record.practiceFrom !== undefined) {
+    return { ok: false, reason: `<@${discordId}>'s audition is already practice.` };
+  }
+
+  const settled = settleRound(record, 1, policy);
+  if (settled?.outcome !== "failed") {
+    return {
+      ok: false,
+      reason:
+        `This is for a Round 1 that didn't move. <@${discordId}>'s Round 1 ` +
+        `${settled ? `settled as **${settled.outcome}**` : "isn't settled yet"}, ` +
+        `so there's nothing to carry them out of.`,
+    };
+  }
+  if (roundOf(record, 1).resultSentAt) {
+    return {
+      ok: false,
+      reason:
+        `<@${discordId}> has already been told. Changing it now would be two ` +
+        `different endings to the same round — tell them yourself, and a ` +
+        `director can put them back on the list.`,
+    };
+  }
+
+  const carried: DiamondsRecord = { ...record, practiceFrom: 2 };
+  await putRecord(env, carried);
+  await refreshReviewCard(env, carried, 1, policy);
+  return { ok: true, record: carried };
+}
+
+/**
+ * Whether this person is one of the two who judge Diamonds, and so exempt from
+ * the renewal ladder.
+ *
+ * Read off the Discord role rather than the director list, because they are
+ * different sets: the director list runs rank 7's cycles and rank 12's
+ * auditions as well, and a director who doesn't judge Diamonds owes their
+ * renewal like everybody else.
+ *
+ * No role configured means nobody is exempt, and an unreadable member means not
+ * exempt either — a notice someone can ignore is a smaller failure than a
+ * membership that silently stops being enforced.
+ */
+async function judgesDiamonds(
+  env: Env,
+  roleId: string | null,
+  discordId: string,
+): Promise<boolean> {
+  if (!roleId) return false;
+  const roles = await memberRoles(env, env.GUILD_DANCE_ID, discordId);
+  return !!roles?.includes(roleId);
+}
+
+/**
+ * A dancer opening their Round 0 feedback, which is what opens Round 1.
+ *
+ * Idempotent on purpose. Re-reading is a thing people do — the document is the
+ * only record of what they were asked to work on, and they will come back to it
+ * mid-window — so a second press shows it again and leaves `readAt` where it
+ * was. The first read is the one the round turns on.
+ */
+export async function markFeedbackRead(
+  env: Env,
+  discordId: string,
+  policy: DiamondsPolicy,
+  now: Date,
+): Promise<FlowResult & { payload?: MessagePayload }> {
+  const record = await getRecord(env, discordId);
+  const doc = record?.document;
+  if (!record || !doc?.deliveredAt) {
+    return {
+      ok: false,
+      reason:
+        "There's no feedback of yours to open yet. If you think there should be, " +
+        "say so in #diamonds-bot — that's worth a director looking at.",
+    };
+  }
+
+  const settled = settleRound(record, 0, policy);
+  const payload = feedbackMessage(
+    doc.content,
+    doc.strengths,
+    doc.growthAreas,
+    settled?.outcome === "passed",
+    policy,
+  );
+
+  if (doc.readAt) return { ok: true, record, payload };
+
+  const read: DiamondsRecord = {
+    ...record,
+    document: { ...doc, readAt: now.toISOString() },
+  };
+  await putRecord(env, read);
+  return { ok: true, record: read, payload };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1043,20 +1291,18 @@ export async function runDiamondsSweep(
   timeline: DiamondsTimeline,
   policy: DiamondsPolicy,
   now = new Date(),
-  /**
-   * Directors, who are exempt from the renewal ladder.
-   *
-   * Passed in rather than read here so the sweep stays testable without a
-   * director list, and defaulted to none so forgetting it chases everybody
-   * rather than nobody — the failure that gets noticed.
-   */
-  directorIds: readonly string[] = [],
 ): Promise<{
   reminded: number;
   nudged: number;
   headsUp: number;
   round0: number;
   planned: number;
+  /** Delivered feedback nobody has opened, nudged once. */
+  unread: number;
+  /** Runs with the two-month clock nearly up, warned once. */
+  warned: number;
+  /** Runs that closed with the rounds unfinished. */
+  expired: number;
   renewals: number;
   lapsed: number;
   /** Memberships that have run out but could not be revoked, and why. */
@@ -1067,6 +1313,9 @@ export async function runDiamondsSweep(
   let headsUp = 0;
   let round0 = 0;
   let planned = 0;
+  let unread = 0;
+  let warned = 0;
+  let expired = 0;
   let renewals = 0;
   let lapsed = 0;
   let blocked = 0;
@@ -1076,9 +1325,9 @@ export async function runDiamondsSweep(
   // what it would have done and changes nothing.
   const roleId = await getDiamondsRoleId(env);
 
-  const last = Math.floor(
-    new Date(lastStartAt(timeline.closesAt, policy.windowDays)).getTime() / 1000,
-  );
+  // Who judges Diamonds, and so owes no renewal. Read once; the per-member
+  // check below only runs for people who actually have a date.
+  const judgeRole = await getDiamondDirectorRoleId(env);
 
   for (const record of await allRecords(env)) {
     // Withdrawing takes you off the audition, not out of Diamonds. So the round
@@ -1113,21 +1362,6 @@ export async function runDiamondsSweep(
         continue;
       }
 
-      if (needsStartNudge(entry, timeline.closesAt, policy.windowDays, policy.nudgeDays, now)) {
-        await sendDirectMessage(env, current.discordId, {
-          content:
-            `⏳ **Round ${round}: last chance to start.** Auditions close for ` +
-            `everyone, so the last day a ${policy.windowDays}-day window can still ` +
-            `shut is <t:${last}:D> (<t:${last}:R>). After that there's nothing ` +
-            `anyone can do about it.\nRun \`/diamonds start\` when you're ready.`,
-        });
-        current = withRound(current, round, { startNudgedAt: now.toISOString() });
-        await putRecord(env, current);
-        nudged += 1;
-        spoke = true;
-        continue;
-      }
-
       if (needsPlanReminder(entry, policy.windowDays, now)) {
         await sendDirectMessage(env, current.discordId, {
           content:
@@ -1146,22 +1380,12 @@ export async function runDiamondsSweep(
         continue;
       }
 
-      if (
-        needsStartHeadsUp(
-          current,
-          round,
-          timeline.closesAt,
-          policy.windowDays,
-          policy.headsUpDays,
-          policy.nudgeDays,
-          now,
-        )
-      ) {
+      if (needsStartHeadsUp(current, round, policy.headsUpDays, now)) {
         await sendDirectMessage(env, current.discordId, {
           content:
             `👋 **Round ${round}: your piece has been waiting ${policy.headsUpDays} ` +
-            `days.** No rush — you have until <t:${last}:D> to start, and the ` +
-            `${policy.windowDays} days run from whenever you do.\n` +
+            `days.** No rush, and nothing expires — the ${policy.windowDays} days ` +
+            `run from whenever you start.\n` +
             `\`/diamonds start\` when you want it.` +
             (ROUND_REVEAL[round] === "on-start"
               ? `\n\nWorth knowing: starting is what shows you the piece, so ` +
@@ -1178,13 +1402,12 @@ export async function runDiamondsSweep(
 
     // And the one nobody else can reach: registered, never submitted Round 0,
     // no window to key off and no piece to wait on.
-    if (!spoke && !quiet && needsRound0Nudge(current, timeline, policy, policy.nudgeDays, now)) {
-      const cliff = Math.floor(new Date(lastRound0At(timeline, policy)).getTime() / 1000);
+    if (!spoke && !quiet && needsRound0Nudge(current, policy.headsUpDays, now)) {
       await sendDirectMessage(env, current.discordId, {
         content:
-          `👋 **You registered but haven't sent your Round 0 cover yet.** There's ` +
-          `no deadline on it as such, but <t:${cliff}:D> (<t:${cliff}:R>) is the ` +
-          `point past which three rounds no longer fit before auditions close.\n` +
+          `👋 **You registered ${policy.headsUpDays} days ago and haven't sent ` +
+          `your Round 0 cover yet.** There's no deadline on it — nothing closes, ` +
+          `and nobody is waiting on anybody else.\n` +
           `An existing cover from the last six months is fine — ` +
           `\`/diamonds submit link:<url>\`.`,
       });
@@ -1194,13 +1417,91 @@ export async function runDiamondsSweep(
       spoke = true;
     }
 
+    // Feedback delivered and never opened, which is the one way to get stuck
+    // that needs nobody's cooperation. Once, then it's theirs: a document is a
+    // thing you read when you're ready to read it, and a bot that asks twice is
+    // a bot telling someone how to feel about their own feedback.
+    if (!spoke && !quiet && feedbackUnread(current, policy.nudgeDays, now)) {
+      await sendDirectMessage(env, current.discordId, {
+        content:
+          `📄 **Your Round 0 feedback is still unopened.** No rush from us, and ` +
+          `nothing expires — but **Round 1 doesn't open until you've read it**, ` +
+          `so it's the one thing standing between you and your next piece.\n` +
+          `It's the message above this one.`,
+      });
+      current = {
+        ...current,
+        document: { ...current.document!, readNudgedAt: now.toISOString() },
+      };
+      await putRecord(env, current);
+      unread += 1;
+      spoke = true;
+    }
+
+    // The two-month clock. Two passes: a warning while there's still time to do
+    // something, then the close itself.
+    //
+    // The warning sits under `spoke` like the other messages, but the close does
+    // not — it isn't a message, it's the audition ending, and someone whose run
+    // closed this morning should not be told about their open window instead.
+    if (!spoke && !quiet && !current.expiredAt) {
+      const left = runDaysLeft(current, policy.runDays, now);
+      if (
+        left !== undefined &&
+        left > 0 &&
+        left <= policy.headsUpDays &&
+        !current.runWarnedAt &&
+        !auditionFinished(current)
+      ) {
+        const ends = Math.floor(new Date(runEndsAt(current, policy.runDays)!).getTime() / 1000);
+        await sendDirectMessage(env, current.discordId, {
+          content:
+            `⏳ **${left} days left on your audition.** All three rounds have to be ` +
+            `done by <t:${ends}:D> — that's the ${policy.runDays} days from when you ` +
+            `registered.\n` +
+            `There's still room: a round takes ${policy.windowDays} days and we turn ` +
+            `feedback round in ${policy.reviewMinDays}–${policy.reviewMaxDays}. If you ` +
+            `need longer, ask a director now rather than after — they can add days.`,
+        });
+        current = { ...current, runWarnedAt: now.toISOString() };
+        await putRecord(env, current);
+        warned += 1;
+        spoke = true;
+      }
+    }
+
+    if (runExpired(current, policy.runDays, now)) {
+      current = { ...current, expiredAt: now.toISOString() };
+      await putRecord(env, current);
+      expired += 1;
+
+      const told = await sendDirectMessage(env, current.discordId, {
+        content:
+          `⌛ **Your audition has closed.** The ${policy.runDays} days you had to ` +
+          `get through all three rounds are up.\n\n` +
+          `This isn't a judgement on your dancing — it's a clock, and it exists so ` +
+          `a Round 1 read and a Round 2 months later aren't being compared as if ` +
+          `they were the same week. **If something got in the way, tell a ` +
+          `director:** they can put you straight back on the list, and that's much ` +
+          `easier than it sounds.`,
+      });
+      await alertDirectors(
+        env,
+        `⌛ **<@${current.discordId}>'s audition has closed** — ${policy.runDays} days ` +
+          `up with the rounds unfinished.` +
+          (told ? "" : ` ⚠️ Couldn't DM them, so they've not been told.`) +
+          `\n\`/diamonds add\` puts them back on if you want to.`,
+      );
+      continue;
+    }
+
     // Membership running out, which is the one thing in this sweep that changes
     // something outside the bot.
     //
     // Ahead of the notices and outside the `spoke` rule, because it isn't a
     // message — it's a fact, and someone whose membership ran out this morning
     // should not be told about their open window instead.
-    if (membershipLapsed(current, now) && !directorIds.includes(current.discordId)) {
+    if (membershipLapsed(current, now) && !(await judgesDiamonds(env, judgeRole, current.discordId))) {
       if (!roleId) {
         // Fail closed. Marking somebody as revoked while the role stayed on is
         // the one failure here nobody would ever notice.
@@ -1214,6 +1515,11 @@ export async function runDiamondsSweep(
           continue;
         }
 
+        // Read before `withLapse` clears it. The message names the date the
+        // membership ran to, which may be weeks back if it passed while they
+        // were mid-audition — and `withLapse` is what makes it unreadable.
+        const ranTo = Math.floor(new Date(current.enforcedAt!).getTime() / 1000);
+
         current = withLapse(current, now.toISOString());
         await putRecord(env, current);
         lapsed += 1;
@@ -1223,7 +1529,8 @@ export async function runDiamondsSweep(
         // DMs a way to stay a Diamond for ever.
         const told = await sendDirectMessage(env, current.discordId, {
           content:
-            `💎 **Your Diamonds membership has ended.** It ran to today, and a ` +
+            `💎 **Your Diamonds membership has ended.** It ran to ` +
+            `<t:${ranTo}:D>, and a ` +
             `re-audition is what renews it — so the role has come off.\n\n` +
             `This isn't a judgement on your dancing and it isn't a door closing: ` +
             `register again whenever you want and you go through the rounds like ` +
@@ -1246,9 +1553,9 @@ export async function runDiamondsSweep(
     // Last, and behind `spoke`, because everything above means they are already
     // mid-audition: a person who is being reminded to submit does not also need
     // telling that failing to re-audition will remove them.
-    if (!spoke && !directorIds.includes(current.discordId)) {
+    if (!spoke) {
       const due = noticeDue(current, policy.noticeDays, now);
-      if (due) {
+      if (due && !(await judgesDiamonds(env, judgeRole, current.discordId))) {
         await sendDirectMessage(
           env,
           current.discordId,
@@ -1274,7 +1581,19 @@ export async function runDiamondsSweep(
     }
   }
 
-  return { reminded, nudged, headsUp, round0, planned, renewals, lapsed, blocked };
+  return {
+    reminded,
+    nudged,
+    headsUp,
+    round0,
+    planned,
+    unread,
+    warned,
+    expired,
+    renewals,
+    lapsed,
+    blocked,
+  };
 }
 
 /**
@@ -1363,6 +1682,9 @@ export async function runDiamondsDaily(
       headsUp: number;
       round0: number;
       planned: number;
+      unread: number;
+      warned: number;
+      expired: number;
       renewals: number;
       lapsed: number;
       blocked: number;
@@ -1370,12 +1692,11 @@ export async function runDiamondsDaily(
   | { skipped: "flag off" }
 > {
   if (!(await isEnabled(env, "diamonds"))) return { skipped: "flag off" };
-  const [timeline, policy, directorIds] = await Promise.all([
+  const [timeline, policy] = await Promise.all([
     getDiamondsTimeline(env),
     getDiamondsPolicy(env),
-    getDirectorIds(env),
   ]);
-  return runDiamondsSweep(env, timeline, policy, new Date(), directorIds);
+  return runDiamondsSweep(env, timeline, policy, new Date());
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1615,8 +1936,31 @@ export async function sendResult(
   // holding a date over them would be the bot chasing its own judges for a
   // verdict they'd have to give themselves. They keep their membership and get
   // no date and no notices.
+  const passed = round === 2 && settled.outcome === "passed";
+
+  // The role, which is the whole point of passing and was the one effect this
+  // never had. Before the DM, so the message can't announce a membership that
+  // didn't happen — and tolerated rather than fatal, because a result that has
+  // been decided should still reach them if Discord is having a bad minute.
+  // A director is told instead; they can add it by hand.
+  let roleAdded = true;
+  if (passed) {
+    const roleId = await getDiamondsRoleId(env);
+    if (!roleId) {
+      roleAdded = false;
+    } else {
+      try {
+        await addRole(env, env.GUILD_DANCE_ID, discordId, roleId);
+      } catch (err) {
+        console.error("diamonds role", err);
+        roleAdded = false;
+      }
+    }
+  }
+
+  const exempt = passed && (await judgesDiamonds(env, await getDiamondDirectorRoleId(env), discordId));
   const promoted: DiamondsRecord =
-    round === 2 && settled.outcome === "passed" && !directorIds.includes(discordId)
+    passed && !exempt
       ? {
           ...record,
           memberSince: at,

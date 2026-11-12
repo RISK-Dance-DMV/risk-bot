@@ -32,7 +32,6 @@ import {
   MIN_STRENGTHS,
   activeRound,
   parseScore,
-  roomForThreeRounds,
   roundOf,
   composeFeedback,
   roundToScore,
@@ -71,8 +70,11 @@ import {
   assignToAll,
   fileFeedback,
   getRecord,
+  extendRun,
   grantExtension,
+  carryAsPractice,
   grantMembership,
+  markFeedbackRead,
   panelContext,
   noteRound,
   planStart,
@@ -354,6 +356,7 @@ async function runSubcommand(
       timeline,
       policy,
       now,
+      option(interaction, "register", "practice") === "true",
     );
     if (!result.ok) return { content: `❌ ${result.reason}` };
     // The panel for whichever round is live, not Round 0's: someone registering
@@ -366,32 +369,7 @@ async function runSubcommand(
   // again; now it starts the same wait a failed audition does, which is not
   // something anyone should be able to do with one mistyped command.
   if (sub === "withdraw") {
-    return {
-      content:
-        `⚠️ **Withdrawing starts the ${policy.retryMonths}-month wait.** Dropping ` +
-        `out counts the same as an audition that didn't go through — otherwise ` +
-        `leaving early would be a way around it — so you wouldn't be able to ` +
-        `register again for ${policy.retryMonths} months, and you'd come back ` +
-        `owing a Round 0 cover.\n\n` +
-        `If you just need more time, you don't need this: nothing expires while ` +
-        `you haven't started a window, and a director can add days to one that's ` +
-        `open. If something has gone wrong, talk to a director first — they can ` +
-        `put you back on the list inside the wait, and that's much easier than ` +
-        `undoing this.`,
-      components: [
-        {
-          type: ComponentType.ACTION_ROW,
-          components: [
-            {
-              type: ComponentType.BUTTON,
-              style: ButtonStyle.DANGER,
-              label: "Withdraw anyway",
-              custom_id: diamondsCustomId("quit", "me"),
-            },
-          ],
-        },
-      ],
-    };
+    return withdrawWarning(policy.retryMonths);
   }
 
   if (sub === "status" || sub === "start") {
@@ -536,15 +514,25 @@ async function runSubcommand(
     const round = parseRound(option(interaction, "extend", "round") || "1");
     if (round === null) return { content: "❌ Round has to be 0, 1 or 2." };
     const days = Number.parseInt(option(interaction, "extend", "days"), 10);
-    const result = await grantExtension(
-      env,
-      dancer,
-      round,
-      days,
-      option(interaction, "extend", "reason"),
-      userId,
-      policy,
-    );
+    const reason = option(interaction, "extend", "reason");
+
+    // One command, two clocks. Defaults to the window because that is the one
+    // that runs out first and the one people ask about — but a window extension
+    // inside a run that's nearly up buys them nothing, so the choice is
+    // explicit rather than inferred.
+    if (option(interaction, "extend", "scope") === "run") {
+      const result = await extendRun(env, dancer, days, reason, userId, policy, now);
+      return said(
+        result,
+        `⏳ <@${dancer}> has ${days} more day${days === 1 ? "" : "s"} on their whole ` +
+          `audition` +
+          (result.ok && result.record.runExtensions && result.record.runExtensions.length > 1
+            ? ` — that's ${result.record.runExtensions.length} extensions now.`
+            : `.`),
+      );
+    }
+
+    const result = await grantExtension(env, dancer, round, days, reason, userId, policy);
     return said(result, `⏳ <@${dancer}> has ${days} more day${days === 1 ? "" : "s"}.`);
   }
 
@@ -568,12 +556,7 @@ async function runSubcommand(
     return said(
       result,
       `✅ <@${dancer}> is on the list as **${cohort}**, and has been DM'd where ` +
-        `things stand.` +
-        (cohort === "new" && !roomForThreeRounds(timeline, policy, now)
-          ? `\n⚠️ Past the point where three rounds still fit before auditions ` +
-            `close. They can submit Round 0 and get feedback, but they can't finish ` +
-            `this cycle unless you move the close date.`
-          : ""),
+        `things stand.`,
     );
   }
 
@@ -584,15 +567,12 @@ async function runSubcommand(
   if (sub === "schedule") {
     const set = await setDiamondsTimeline(env, {
       opensAt: option(interaction, "schedule", "opens"),
-      closesAt: option(interaction, "schedule", "closes"),
     });
     if (!set.ok) return { content: `❌ ${set.reason}` };
-    // Read back rather than echoed: the point of setting a date here is to find
-    // out what the whole calendar now says, including whether it can be run.
+    // Read back rather than echoed: the point of setting the date here is to see
+    // what the whole setup now says.
     const readout = configReadout(await inspectDiamondsConfig(env));
-    return {
-      content: `📅 Set ${set.changed.length} date${set.changed.length === 1 ? "" : "s"}.\n\n${readout.content}`,
-    };
+    return { content: `📅 Set the open date.\n\n${readout.content}` };
   }
 
   if (sub === "score") {
@@ -661,7 +641,16 @@ export async function handleDiamondsComponent(
   // The dancer's buttons are safe for anyone to press because they act on the
   // clicker rather than on a named person — `start` opens your own window and
   // `quit` withdraws you.
-  const DANCER_ACTIONS: DiamondsAction[] = ["start", "quit"];
+  const DANCER_ACTIONS: DiamondsAction[] = [
+    "start",
+    "quit",
+    "read",
+    "submit",
+    "submit-save",
+    "plan",
+    "plan-save",
+    "leave",
+  ];
   if (!DANCER_ACTIONS.includes(action)) {
     if (!isDirector(await getDirectorIds(env), userId)) {
       return json(ephemeral("That one's for the directors."));
@@ -801,6 +790,126 @@ export async function handleDiamondsComponent(
           };
         }
         await editOriginalResponse(env, interaction.application_id, interaction.token, payload);
+      })(),
+    );
+    return json({ type: InteractionResponseType.DEFERRED_UPDATE_MESSAGE });
+  }
+
+  // The dancer's own buttons. A modal has to be the immediate response, so
+  // these read the record inline to work out which round they're in — the same
+  // derivation the slash commands do, for the same reason: nobody should have
+  // to know they're in Round 1 to submit.
+  if (action === "submit" || action === "plan") {
+    const now = new Date();
+    const live = await liveRound(env, userId, now);
+    if (!live.ok) return json(ephemeral(`❌ ${live.reason}`));
+    return json(action === "submit" ? submitModal(live.round) : planModal(live.round));
+  }
+
+  if (action === "submit-save" || action === "plan-save") {
+    // Replaces the panel it was opened from, so the panel always shows what is
+    // true now — submitted, or the day they just picked.
+    ctx.waitUntil(
+      (async () => {
+        let payload: MessagePayload;
+        try {
+          const now = new Date();
+          const { timeline, policy, ctx: panel } = await context(env);
+          const live = await liveRound(env, userId, now);
+          if (!live.ok) {
+            payload = { content: `❌ ${live.reason}`, components: [] };
+          } else {
+            const result =
+              action === "submit-save"
+                ? await submit(
+                    env,
+                    userId,
+                    live.round,
+                    modalValue(interaction, SUBMIT_LINK),
+                    timeline,
+                    policy,
+                    now,
+                  )
+                : await planStart(
+                    env,
+                    userId,
+                    live.round,
+                    modalValue(interaction, PLAN_DATE),
+                    timeline,
+                    policy,
+                    now,
+                  );
+            payload = result.ok
+              ? roundPanel(result.record, live.round, panel, now)
+              : { content: `❌ ${result.reason}` };
+          }
+        } catch (err) {
+          payload = {
+            content: `That didn't go through: ${err instanceof Error ? err.message : String(err)}`,
+          };
+        }
+        await editOriginalResponse(env, interaction.application_id, interaction.token, payload);
+      })(),
+    );
+    return json({ type: InteractionResponseType.DEFERRED_UPDATE_MESSAGE });
+  }
+
+  // Opens the warning rather than withdrawing. The confirm is in there, next to
+  // the words that say what it costs.
+  if (action === "leave") {
+    const policy = await getDiamondsPolicy(env);
+    return json({
+      type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+      data: withdrawWarning(policy.retryMonths),
+    });
+  }
+
+  if (action === "carry") {
+    const dancer = arg;
+    if (!/^\d{15,}$/.test(dancer)) return json(ephemeral("That button has gone stale."));
+
+    ctx.waitUntil(
+      (async () => {
+        const policy = await getDiamondsPolicy(env);
+        const result = await carryAsPractice(env, dancer, policy);
+        await editOriginalResponse(env, interaction.application_id, interaction.token, {
+          content: result.ok
+            ? `📝 **<@${dancer}>'s Round 2 is practice now.** The Round 1 result ` +
+              `hasn't gone anywhere yet — press **Read back & send** and you'll ` +
+              `see the version that says both things.`
+            : `❌ ${result.reason}`,
+        });
+      })(),
+    );
+    return json({ type: InteractionResponseType.DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE, data: { flags: 64 } });
+  }
+
+  if (action === "read") {
+    // Replaces the notice with the document, so the button can't sit there
+    // looking unpressed next to the thing it opened. Pressing it again on an
+    // old notice is harmless — `markFeedbackRead` is idempotent and re-shows
+    // the document, which is what someone scrolling back actually wants.
+    ctx.waitUntil(
+      (async () => {
+        let payload: MessagePayload;
+        try {
+          const now = new Date();
+          const { policy } = await context(env);
+          const result = await markFeedbackRead(env, userId, policy, now);
+          payload = result.ok
+            ? { ...result.payload!, components: [] }
+            : { content: `❌ ${result.reason}`, components: [] };
+        } catch (err) {
+          payload = {
+            content: `That didn't go through: ${err instanceof Error ? err.message : String(err)}`,
+          };
+        }
+        await editOriginalResponse(
+          env,
+          interaction.application_id,
+          interaction.token,
+          payload,
+        );
       })(),
     );
     return json({ type: InteractionResponseType.DEFERRED_UPDATE_MESSAGE });
@@ -1118,6 +1227,103 @@ const SCORE_PREFIX = "score-";
  * fifth dimension is ever wanted, this becomes two forms or a select, and that
  * is a reason to think twice rather than a reason to split it.
  */
+const SUBMIT_LINK = "submit-link";
+const PLAN_DATE = "plan-date";
+
+/**
+ * One box, because a submission is one fact.
+ *
+ * A modal rather than a command option so the label can say what a good answer
+ * looks like at the moment someone is typing it — "a link anyone can open" is
+ * the whole of what goes wrong here, and it goes wrong silently.
+ */
+function submitModal(round: Round): unknown {
+  return {
+    type: InteractionResponseType.MODAL,
+    data: {
+      custom_id: diamondsCustomId("submit-save", "me"),
+      title: `Round ${round} — submit`,
+      components: [
+        {
+          type: ComponentType.ACTION_ROW,
+          components: [
+            {
+              type: ComponentType.TEXT_INPUT,
+              custom_id: SUBMIT_LINK,
+              style: TextInputStyle.SHORT,
+              label: "Link to your video",
+              placeholder: "A link anyone can open — Drive, YouTube, anything",
+              required: true,
+              max_length: 400,
+            },
+          ],
+        },
+      ],
+    },
+  };
+}
+
+function planModal(round: Round): unknown {
+  return {
+    type: InteractionResponseType.MODAL,
+    data: {
+      custom_id: diamondsCustomId("plan-save", "me"),
+      title: `Round ${round} — when you'll start`,
+      components: [
+        {
+          type: ComponentType.ACTION_ROW,
+          components: [
+            {
+              type: ComponentType.TEXT_INPUT,
+              custom_id: PLAN_DATE,
+              style: TextInputStyle.SHORT,
+              label: "Roughly which day? YYYY-MM-DD",
+              placeholder: "An estimate — change it as often as you like",
+              required: true,
+              max_length: 10,
+            },
+          ],
+        },
+      ],
+    },
+  };
+}
+
+/**
+ * The one warning, shared by the command and the button.
+ *
+ * Here rather than duplicated because it is the only place in the process that
+ * tells someone a cost before they pay it, and two copies of that drift.
+ */
+function withdrawWarning(retryMonths: number): MessagePayload {
+  return {
+    content:
+      `⚠️ **Withdrawing starts the ${retryMonths}-month wait.** Dropping ` +
+      `out counts the same as an audition that didn't go through — otherwise ` +
+      `leaving early would be a way around it — so you wouldn't be able to ` +
+      `register again for ${retryMonths} months, and you'd come back ` +
+      `owing a Round 0 cover.\n\n` +
+      `If you just need more time, you don't need this: nothing expires while ` +
+      `you haven't started a window, and a director can add days to one that's ` +
+      `open. If something has gone wrong, talk to a director first — they can ` +
+      `put you back on the list inside the wait, and that's much easier than ` +
+      `undoing this.`,
+    components: [
+      {
+        type: ComponentType.ACTION_ROW,
+        components: [
+          {
+            type: ComponentType.BUTTON,
+            style: ButtonStyle.DANGER,
+            label: "Withdraw anyway",
+            custom_id: diamondsCustomId("quit", "me"),
+          },
+        ],
+      },
+    ],
+  };
+}
+
 function scoreModal(dancer: string, round: Round, target: string | undefined): unknown {
   const row = (custom_id: string, label: string, placeholder: string) => ({
     type: ComponentType.ACTION_ROW,

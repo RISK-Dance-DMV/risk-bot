@@ -756,7 +756,8 @@ opposite of waiting on us.
 `src/diamonds/flow.ts` — KV storage keyed by person, not by attempt: a Diamonds
 audition is one process with three rounds, not three tries. Registration is
 idempotent and refuses only once auditions have closed. `fileFeedback` is one
-path for both cohorts, because delivering it is what opens Round 1 and a second
+path for both cohorts, because the dancer *opening* it is what opens Round 1
+(see "Reading it is the gate", below) and a second
 path would be a second way for that not to happen; filing and delivering are one
 action, since a queue of filed-but-unsent feedback is a queue of people blocked
 without knowing it. Assignment DMs the dancer, and refuses to put a Round 1
@@ -1212,6 +1213,144 @@ re-audition part-way is the likeliest person in the whole system to reach their
 enforcement date, and silence is exactly what would take them there. `noticeDue`
 is gated on `enforcedAt` rather than on `withdrawnAt` for the same reason:
 "nothing to renew" is a fact about membership, and withdrawing isn't one.
+
+### Reading it is the gate
+
+**Round 1 opens when the dancer opens their feedback, not when we send it.**
+Delivery is our side of the exchange; the round is a response to something
+having been *named to them*, and a document nobody has opened has named
+nothing. So the DM carries the verdict and a button, the button reveals the
+document, and the first read sets `document.readAt` — which is what
+`activeRound` and `feedbackReady` now key on.
+
+Three consequences, each of which is a decision rather than a side effect:
+
+- **The verdict is in the notice, not behind the button.** Making someone click
+  to learn whether they're through would turn opening their own feedback into an
+  act of courage. The decision is owed immediately; the reasons can wait for a
+  minute they choose.
+- **A director can still assign the Round 1 piece.** That gates on delivery
+  (`feedbackSentOut`), not on the read, because a director's work must not wait
+  on a dancer's inbox and the piece is revealed on start anyway. Only starting
+  the window waits.
+- **One nudge, three days on.** `feedbackUnread` is the only way to get stuck in
+  this process that needs nobody's cooperation, so it gets a single message and
+  then stops. Asking twice would be telling someone how to feel about their own
+  feedback.
+
+### Four things changed after a read-through
+
+**Round 1's ask scales with the start.** A flat one-step demand was the same at
+3 as at 7, which was wrong twice: a step at the bottom is the easiest kind of
+progress and the weakest evidence, and a step at the top is the hardest and the
+strongest. The ask is now **half the distance to the bar**, floored at one
+anchor step and capped at the bar — see `targetToBeat`. The cap also removes a
+cliff nobody had noticed: under the flat rule somebody at 7 needed 8.25, *above*
+the bar, while somebody at 7.5 only had to hold still, so the hardest place on
+the whole scale to start was just underneath the bar.
+
+**The close date is gone.** It was the last thing in the timeline that applied
+to everyone at once, and under rolling membership it had nothing left to mean —
+it was refusing registrations, Round 0 submissions and window starts on behalf
+of a cycle that no longer exists. Gone with it: `lastStartAt`,
+`lastRound0At`, `daysStillNeeded`, `roomForThreeRounds`, `canSubmitRound0`,
+`canFileDocument`, `timelineProblems`, and the sweep's last-chance nudge. The
+Round 0 nudge now counts **from the registration** rather than back from a
+cliff, which is the only honest version of that message: "you put your name
+down ten days ago and we've not seen anything."
+
+**Passing adds the role.** It was the one effect of a pass that happened outside
+the bot, and it wasn't happening: the record said Diamond and Discord didn't.
+Tolerated rather than fatal — a decided result should still reach someone if
+Discord is having a bad minute, so a failure tells a director instead.
+
+**Exemption is a role, not the director list.** `config:role.diamonds_director`.
+The director list runs rank 7's cycles and rank 12's auditions as well, so a
+director who doesn't judge Diamonds owes their renewal like anyone else. Unset
+means nobody is exempt, which is the safe direction.
+
+### Practice, and what "failed" means now
+
+**"practice" used to mean two things and now means one.** It was Round 1's
+outcome for not advancing — the audition was over, but the word was gentler than
+"failed" — which made a dead end sound like an option. Not advancing is now
+`failed`, and `practice` is reserved for a round that was never being judged.
+
+Two ways into practice, both stored as `practiceFrom`, the first round that
+isn't judged:
+
+- **`0` — the dancer asked**, at registration. No verdict in any of the three
+  rounds; Round 0's document *is* the round, since there is nothing to wait for.
+- **`2` — a director offered**, from the card, after a Round 1 fail.
+
+The second one is why `carriedPast` exists. Round 1 genuinely failed and the
+audition genuinely continues, so the record keeps both: the round says `failed`,
+and practice starting at 2 says it wasn't the end. Overwriting the fail with
+"practice" would have been tidier and would have lost the only honest reading.
+
+**Practice carries no consequence**, and three separate rules had to agree to
+that: `auditionResulted` doesn't end on it, `retryBlockedUntil` doesn't count it
+(a wait would make asking for practice the riskier choice), and `sendResult`
+can't promote it because it never settles as `passed`. It also doesn't survive a
+re-audition — `reAudition` clears it, since one practice run shouldn't quietly
+make every future attempt a practice run.
+
+### Sixty days, and the buttons
+
+**The run has a deadline again, and this one is per person.** 60 days from
+registration (`diamonds_run_days`) to finish all three rounds, derived by
+`runEndsAt` and enforced in three places: the sweep closes an expired run, and
+`startWindow` and `submit` refuse past it. It is the opposite of the close date
+that came out — that one belonged to a cycle and made everyone share a cliff;
+this one belongs to one dancer and can't make anybody wait for anybody.
+
+Three decisions inside it:
+
+- **Counted from registration**, not from the first submission. The time people
+  actually lose is the stretch before Round 0, and a clock that doesn't cover it
+  wouldn't do anything.
+- **Running out costs the six-month wait — decided.** Same as withdrawing, by
+  the argument that made withdrawing cost it: there are exactly two ways to not
+  finish, and if one of them is free it is the one everybody takes. Quitting is
+  a thing you do and running out is a thing that happens to you, which is a real
+  difference — but it is handled by **an extension**, not by a cheaper wait.
+  `/diamonds extend scope:run` moves the date, before or after it passes.
+- **Nothing is invented for a record without `registeredAt`.** A deadline
+  somebody was never told about is worse than no deadline.
+
+**And the dancer's commands are buttons now.** `submit` and `plan` open modals,
+`withdraw` opens the warning that already existed (the confirm stays in there,
+next to the words that say what it costs), and the panel they were pressed from
+is replaced by what is true afterwards. `/diamonds register` is the only thing
+anyone has to type. The buttons are keyed to nobody — the clicker's id comes off
+the interaction — so the same panel is safe in a DM, an ephemeral reply or a
+nudge.
+
+### A date that lands mid-audition
+
+**Enforcement is deferred, not applied, while a re-audition is live.** Someone
+whose Jan 1 falls in the middle of their own re-audition keeps the role until
+that audition ends — they are doing the exact thing the date exists to ask for,
+and removing them would be the bot failing to notice its own question being
+answered. The renewal notices go quiet on the same condition.
+
+`renewalUnderway` is what both read, and it changed shape to do this: it used to
+mean "submitted since membership started, not yet resulted", which its own
+docstring admitted was vacuously false while re-auditions didn't exist. It now
+means **registered since membership started, and not finished** — finished in
+every sense, so a verdict, a withdrawal or an expiry all end the deferral and
+hand the member straight back to a date that may already have gone.
+
+Counting from the registration rather than from a submission is what makes it
+match the rule as stated, and it would be wide open — register, keep the role,
+submit nothing — if registering didn't also start the two-month clock. **The
+clock is what makes this safe.** The two rules arrived together and neither
+works alone.
+
+One bug found while testing it: the lapse DM read `enforcedAt` *after*
+`withLapse` had cleared it, so the message said `<t:NaN:D>`. It only showed up
+because this rule made the date worth naming — before, "it ran to today" was
+true.
 
 ## Still open
 

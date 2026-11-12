@@ -20,11 +20,12 @@ import {
   retryBlocked,
   feedbackWritten,
   roundToScore,
-  daysStillNeeded,
-  lastRound0At,
-  lastStartAt,
-  roomForThreeRounds,
+  anyPractice,
+  isPractice,
   roundOf,
+  runDaysLeft,
+  runEndsAt,
+  targetToBeat,
   startWarning,
   visiblePiece,
   windowClosesAt,
@@ -60,7 +61,17 @@ export type DiamondsAction =
   | "note-save"
   /** The ephemeral read-back that the one irreversible button lives on. */
   | "preview"
-  | "send";
+  | "send"
+  /** A dancer opening their Round 0 feedback, which is what opens Round 1. */
+  | "read"
+  /** Round 1 didn't move: carry them into Round 2 as practice instead. */
+  | "carry"
+  /** The dancer's own four, so `register` is the only thing anyone types. */
+  | "submit"
+  | "submit-save"
+  | "plan"
+  | "plan-save"
+  | "leave";
 
 const ACTIONS: DiamondsAction[] = [
   "start",
@@ -74,6 +85,13 @@ const ACTIONS: DiamondsAction[] = [
   "note-save",
   "preview",
   "send",
+  "read",
+  "carry",
+  "submit",
+  "submit-save",
+  "plan",
+  "plan-save",
+  "leave",
 ];
 const PREFIX = "dia";
 const ARG = /^[0-9a-zA-Z:_-]{1,64}$/;
@@ -130,8 +148,14 @@ function day(iso: string): string {
   return Number.isFinite(unix) ? `<t:${unix}:D>` : iso;
 }
 
+/**
+ * Named after the year it opened, now that nothing closes.
+ *
+ * Still a name rather than nothing: "Diamonds 2026" is what people will call
+ * it, and a panel headed by a round number alone reads like a form.
+ */
 export function cycleName(timeline: DiamondsTimeline): string {
-  return `Diamonds ${new Date(timeline.closesAt).getUTCFullYear()}`;
+  return `Diamonds ${new Date(timeline.opensAt).getUTCFullYear()}`;
 }
 
 /** Everything the panels need to know beyond the record itself. */
@@ -143,19 +167,120 @@ export interface PanelContext {
   /** Only the roster uses this, and only to say what's stuck on one ballot. */
   minScores: number;
   retryMonths: number;
+  /** Round 1's panel quotes the number they have to reach, so it needs both. */
+  bar: number;
+  requiredSteps: number;
+  /** Days for the whole run, counted from registration. */
+  runDays: number;
 }
 
-const START_BUTTON = (round: Round) => ({
-  type: ComponentType.ACTION_ROW,
-  components: [
-    {
-      type: ComponentType.BUTTON,
-      style: ButtonStyle.PRIMARY,
-      label: "Start time now",
-      custom_id: diamondsCustomId("start", String(round)),
-    },
-  ],
-});
+/**
+ * The notice that feedback exists, and the button that opens it.
+ *
+ * The verdict is in the notice rather than behind the button. Holding a "we're
+ * not taking this through" behind a click would make opening it an act of
+ * courage, and the one thing a dancer is owed immediately is the decision; what
+ * the button is for is the reasons, which take a minute they should be able to
+ * choose.
+ *
+ * Keyed to nobody, like the start button: the clicker's own id comes off the
+ * interaction, so the same notice is safe anywhere.
+ */
+export function feedbackArrived(passed: boolean, windowDays: number): MessagePayload {
+  return {
+    content: passed
+      ? `💎 **Round 0: you're through.** Your written feedback is ready — the ` +
+        `reasons, what you brought, and the one thing we want to see move.
+
+` +
+        `**Opening it is what starts Round 1**, so read it when you've got a ` +
+        `proper minute rather than between trains. Nothing is timed by this: ` +
+        `your ${windowDays}-day window still only starts when you press start, ` +
+        `whenever that is.`
+      : `**Round 0: we're not taking this one through to Round 1.** That's our ` +
+        `call on what we saw, not a verdict on you as a dancer.
+
+` +
+        `Your written feedback is ready, and it's the part worth having — three ` +
+        `things you brought and the ones to work on. Read it whenever you want ` +
+        `to.`,
+    components: [
+      {
+        type: ComponentType.ACTION_ROW,
+        components: [
+          {
+            type: ComponentType.BUTTON,
+            style: ButtonStyle.PRIMARY,
+            label: passed ? "Read it & start Round 1" : "Read my feedback",
+            custom_id: diamondsCustomId("read", "me"),
+          },
+        ],
+      },
+    ],
+  };
+}
+
+/**
+ * Says so, on every panel, whenever this round isn't being judged.
+ *
+ * On the head rather than buried in the body because it changes what every
+ * other line on the panel means — a window, a score and a piece all read
+ * differently when nothing is riding on them, and someone who forgot they asked
+ * for practice should not have to infer it from the absence of a verdict.
+ */
+function practiceTag(record: DiamondsRecord, round: Round): string {
+  if (!isPractice(record, round)) return "";
+  return record.practiceFrom === 0 ? " · practice" : " · practice from here";
+}
+
+/**
+ * The dancer's own buttons, by what they can actually do right now.
+ *
+ * Keyed to nobody — the clicker's id comes off the interaction, so the same
+ * panel is safe in a DM, in an ephemeral reply and on a nudge. The commands all
+ * still work; these exist because `/diamonds submit link:<url>` is a lot to
+ * type on a phone in a studio, and because a panel that tells you to run a
+ * command is a panel that could have just done the thing.
+ *
+ * Never the irreversible one. Withdrawing costs six months, so its button only
+ * opens the warning — the confirm lives there, where the words are.
+ */
+const BUTTON = {
+  start: (round: Round) => ({
+    type: ComponentType.BUTTON,
+    style: ButtonStyle.PRIMARY,
+    label: "Start time now",
+    custom_id: diamondsCustomId("start", String(round)),
+  }),
+  submit: (first: boolean) => ({
+    type: ComponentType.BUTTON,
+    style: first ? ButtonStyle.PRIMARY : ButtonStyle.SECONDARY,
+    label: first ? "Submit my video" : "Replace it",
+    custom_id: diamondsCustomId("submit", "me"),
+  }),
+  cover: (first: boolean) => ({
+    type: ComponentType.BUTTON,
+    style: first ? ButtonStyle.PRIMARY : ButtonStyle.SECONDARY,
+    label: first ? "Submit my cover" : "Replace it",
+    custom_id: diamondsCustomId("submit", "me"),
+  }),
+  plan: (set: boolean) => ({
+    type: ComponentType.BUTTON,
+    style: ButtonStyle.SECONDARY,
+    label: set ? "Change my day" : "Say when I'll start",
+    custom_id: diamondsCustomId("plan", "me"),
+  }),
+  leave: {
+    type: ComponentType.BUTTON,
+    style: ButtonStyle.SECONDARY,
+    label: "Withdraw",
+    custom_id: diamondsCustomId("leave", "me"),
+  },
+} as const;
+
+const row = (...buttons: unknown[]) => [
+  { type: ComponentType.ACTION_ROW, components: buttons },
+];
 
 /* -------------------------------------------------------------------------- */
 /* -------------------------------------------------------------------------- */
@@ -168,21 +293,22 @@ function roundZeroPanel(
   now: Date,
 ): MessagePayload {
   const entry = roundOf(record, 0);
-  const head = `**Round 0 · ${cycleName(ctx.timeline)}**`;
-  const cliff = lastRound0At(ctx.timeline, ctx);
-  const room = roomForThreeRounds(ctx.timeline, ctx, now);
+  const head = `**Round 0 · ${cycleName(ctx.timeline)}${practiceTag(record, 0)}**`;
 
   if (record.cohort === "returning") {
     // Nothing is assessed, so there is nothing for them to do but be on the
     // list. Said plainly, because "you're registered and that's all" reads like
     // a missing instruction otherwise.
-    const doc = record.document?.deliveredAt
-      ? `Your feedback went out ${day(record.document.deliveredAt)}, which means ` +
-        `Round 1 is open for you — ask the directors for your piece if it hasn't ` +
-        `arrived.`
-      : `The directors are writing up your season and deciding whether to take ` +
-        `you through. It arrives here as one message — what they saw, and the ` +
-        `call — and that message is what opens Round 1 for you.`;
+    const doc = record.document?.readAt
+      ? `You opened your feedback ${day(record.document.readAt)}, so Round 1 is ` +
+        `open for you — ask the directors for your piece if it hasn't arrived.`
+      : record.document?.deliveredAt
+        ? `**Your feedback is in your DMs, unopened.** Opening it is what opens ` +
+          `Round 1 — until then there's nothing for the round to be a response ` +
+          `to.`
+        : `The directors are writing up your season and deciding whether to take ` +
+          `you through. You'll get a note the moment it's ready, and opening it ` +
+          `is what opens Round 1 for you.`;
     // A renewal and a first-time returning Diamond are in the same state but
     // not in the same conversation: one of them is being told how this works
     // and the other already knows.
@@ -200,8 +326,9 @@ function roundZeroPanel(
         `${head}\n✅ **Submitted** ${when(entry.submittedAt)}.\n${entry.submissionUrl ?? ""}\n\n` +
         `We'll come back to you within **${ctx.reviewMinDays}–${ctx.reviewMaxDays} days** with ` +
         `written feedback and whether you're through to Round 1 — one message, ` +
-        `both things. You can still replace this with another ` +
-        `\`/diamonds submit\` until we do: the last one in is the one we watch.`,
+        `both things. You can still replace this until we do: the last one in is ` +
+        `the one we watch.`,
+      components: row(BUTTON.cover(false)),
     };
   }
 
@@ -212,15 +339,9 @@ function roundZeroPanel(
       `have to film something new. It's judged as a yes or a no, not scored: ` +
       `does this belong in the process. Either way you get the feedback.\n` +
       `Submit with \`/diamonds submit link:<url>\`.\n\n` +
-      (room
-        ? `**There's no fixed deadline for this** — go when you're ready. The one ` +
-          `date that matters is ${day(cliff)}: submit after that and there isn't ` +
-          `room left for Rounds 1 and 2 before auditions close ${day(ctx.timeline.closesAt)}. ` +
-          `Sooner is easier on everyone, yours included.`
-        : `⚠️ **Past ${day(cliff)}, so three rounds no longer fit** before auditions ` +
-          `close ${day(ctx.timeline.closesAt)}. You're very welcome to submit anyway and ` +
-          `get the feedback — just know it can't finish this cycle.`) +
+      runLine(record, ctx, now) +
       planLine(entry),
+    components: row(BUTTON.cover(true), BUTTON.plan(!!entry.plannedStartAt)),
   };
 }
 
@@ -239,6 +360,33 @@ function roundZeroPanel(
  * Always says it can be moved. A plan that feels like a promise is a plan
  * people avoid making.
  */
+/**
+ * Their own deadline, which is the only one left.
+ *
+ * Said on every panel where the next move is theirs, because it is the one
+ * thing in a rolling process that can run out without anybody doing anything —
+ * and a clock nobody mentions is a clock people find out about afterwards.
+ */
+function runLine(record: DiamondsRecord, ctx: PanelContext, now: Date): string {
+  const ends = runEndsAt(record, ctx.runDays);
+  if (!ends) return "";
+  const left = runDaysLeft(record, ctx.runDays, now) ?? 0;
+  const needed = ctx.reviewMaxDays * 2 + ctx.windowDays * 2;
+
+  if (left <= 0) {
+    return (
+      `\n\n⌛ **Your ${ctx.runDays} days ran out ${day(ends)}.** Talk to a director — ` +
+      `they can add days or put you back on the list.`
+    );
+  }
+  return (
+    `\n\n⏳ **All three rounds by ${day(ends)}** — ${ctx.runDays} days from when you ` +
+    `registered, and **${left}** left. The whole thing takes about ${needed} days ` +
+    `of actual process, so there's room; if you need more, ask a director before ` +
+    `the date rather than after.`
+  );
+}
+
 function planLine(entry: RoundRecord): string {
   if (entry.plannedStartAt) {
     return (
@@ -248,22 +396,31 @@ function planLine(entry: RoundRecord): string {
     );
   }
   return (
-    `\n\n📌 **Pick a day you'll start and tell me:** ` +
+    `\n\n📌 **Pick a day you'll start and tell me** — the button below, or ` +
     `\`/diamonds plan date:YYYY-MM-DD\`. You can change it as often as you like ` +
     `and nothing is held against it — but you'll get a reminder that morning, and ` +
     `a day you chose yourself is much easier to hit than no day at all.`
   );
 }
 
-function targetLine(record: DiamondsRecord, round: Round): string {
+function targetLine(record: DiamondsRecord, round: Round, ctx: PanelContext): string {
   if (round !== 1 || !record.target) return "";
+  // The number they have to reach, said out loud. The rule behind it — half the
+  // distance to the bar, capped at the bar — is not something anyone should have
+  // to reconstruct from a doc to know what this round is asking of them.
   const before =
     record.targetBefore === undefined
       ? ""
       : ` We have it at **${record.targetBefore.toFixed(1)}/10** as of the day ` +
         `this piece went up, and that number is now fixed — it was set before ` +
         `anyone had seen what you'd do with it, which is the only way it's worth ` +
-        `anything.`;
+        `anything.\n**To advance, we need to read it at ` +
+        `${targetToBeat(record.targetBefore, ctx.bar, ctx.requiredSteps).toFixed(2)}/10 ` +
+        `or better.**` +
+        (record.targetBefore >= ctx.bar
+          ? ` It's already at the bar, so the ask is that it's still there.`
+          : ` That's half the distance to the bar — the further off it is, the ` +
+            `more of that distance we want to see closed.`);
   return (
     `\n**What this round is looking at:** ${record.target}.${before}\n` +
     `Round 2 scores the four dimensions against the bar; this round doesn't. It ` +
@@ -288,7 +445,7 @@ export function roundPanel(
   if (round === 0) return roundZeroPanel(record, ctx, now);
 
   const entry = roundOf(record, round);
-  const head = `**Round ${round} · ${cycleName(ctx.timeline)}**`;
+  const head = `**Round ${round} · ${cycleName(ctx.timeline)}${practiceTag(record, round)}**`;
   const state = windowState(entry, ctx.windowDays, now);
 
   if (state === "submitted") {
@@ -301,6 +458,15 @@ export function roundPanel(
             `you're through, your final piece.`
           : `That's everything. We'll come back within **${ctx.reviewMinDays}–${ctx.reviewMaxDays} days**.`) +
         `\nEveryone who submits gets feedback, whether or not they advance.`,
+      // Still replaceable while the window is open: the last one in is the one
+      // we watch, and someone who finds a better take at 1am shouldn't have to
+      // ask anybody.
+      components:
+        windowState(entry, ctx.windowDays, now) === "submitted" &&
+        windowClosesAt(entry, ctx.windowDays) &&
+        new Date(windowClosesAt(entry, ctx.windowDays)!).getTime() > now.getTime()
+          ? row(BUTTON.submit(false))
+          : undefined,
     };
   }
 
@@ -312,8 +478,10 @@ export function roundPanel(
         `${head}\n⏱️ **Your window is open** — it closes ${when(closes)}.` +
         `${entry.extension ? ` (Includes the ${entry.extension.days}-day extension.)` : ""}\n\n` +
         `**Your piece:**\n${piece}\n\n` +
-        `Submit with \`/diamonds submit link:<url>\` before your window closes.` +
-        targetLine(record, round),
+        `Submit before your window closes — the button, or ` +
+        `\`/diamonds submit link:<url>\`.` +
+        targetLine(record, round, ctx),
+      components: row(BUTTON.submit(true)),
     };
   }
 
@@ -331,20 +499,20 @@ export function roundPanel(
     };
   }
 
-  const allowed = canStartWindow(record, round, ctx.timeline.closesAt, ctx.windowDays, now);
+  const allowed = canStartWindow(record, round, ctx.windowDays, now);
   if (!allowed.ok) return { content: `${head}\n⚠️ ${allowed.reason}` };
 
-  const last = lastStartAt(ctx.timeline.closesAt, ctx.windowDays);
   return {
     content:
       `${head}\n🎬 **Your piece is ready.** Nobody needs to be here for this — ` +
       `start whenever you're ready to give it ${ctx.windowDays} days.\n\n` +
       `${startWarning(ROUND_REVEAL[round], ctx.windowDays)}\n\n` +
-      `No hurry beyond **${day(last)}**, the last day a ${ctx.windowDays}-day window ` +
-      `can still shut before auditions close.` +
-      targetLine(record, round) +
+      `**No deadline on starting the window itself** — the piece keeps until you ` +
+      `want it.` +
+      runLine(record, ctx, now) +
+      targetLine(record, round, ctx) +
       planLine(entry),
-    components: [START_BUTTON(round)],
+    components: row(BUTTON.start(round), BUTTON.plan(!!entry.plannedStartAt)),
   };
 }
 
@@ -414,10 +582,17 @@ export function statusPanel(
       `${panel.content}\n\n**Where everything stands**\n${lines
         .map((one) => `· ${one}`)
         .join("\n")}\n\n` +
-      `Everything shuts ${day(ctx.timeline.closesAt)}. Each window is ${ctx.windowDays} ` +
-      `days and we review within ${ctx.reviewMinDays}–${ctx.reviewMaxDays}, so all ` +
-      `three rounds need about ${daysStillNeeded(ctx)} days end to end at worst.`,
-    components: panel.components,
+      `Each window is ${ctx.windowDays} days and we review within ` +
+      `${ctx.reviewMinDays}–${ctx.reviewMaxDays}, so all three rounds take about ` +
+      `${ctx.reviewMaxDays * 2 + ctx.windowDays * 2} days end to end at worst — ` +
+      `whenever you choose to spend them.`,
+    // Withdrawing lives here rather than on a round panel, because this is the
+    // panel about *them* rather than about a round — and because the one button
+    // that costs six months should not sit next to the one that submits a video.
+    components: [
+      ...((panel.components as unknown[]) ?? []),
+      ...(activeRound(record, now).ok ? row(BUTTON.leave) : []),
+    ],
   };
 }
 
@@ -527,7 +702,7 @@ export function rosterReadout(
   const done = rows.filter((one) => one.side === "done");
 
   const parts = [
-    `**${cycleName(ctx.timeline)}** — ${live.length} registered, closes ${day(ctx.timeline.closesAt)}`,
+    `**${cycleName(ctx.timeline)}** — ${live.length} registered`,
     "",
     ours.length > 0
       ? `⏳ **${ours.length} waiting on you** — review within ${ctx.reviewMaxDays} days\n${ours.map(line).join("\n")}`
@@ -572,7 +747,6 @@ export function configReadout(readout: {
   timeZone: string;
   roleConfigured: boolean;
   enabled: boolean;
-  problems: string[];
 }): MessagePayload {
   const mark = (source: "set" | "default") => (source === "set" ? "✅" : "·");
   const { policy } = readout;
@@ -586,19 +760,24 @@ export function configReadout(readout: {
     ],
     ["diamonds_bar", "bar", `${policy.bar} weighted, Round 2 only`],
     ["diamonds_floor", "floor", `${policy.floor} in any one dimension`],
-    ["diamonds_start_heads_up_days", "heads-up", `${policy.headsUpDays} days sitting on a piece`],
-    ["diamonds_start_nudge_days", "last chance", `${policy.nudgeDays} days before the cliff`],
+    [
+      "diamonds_start_heads_up_days",
+      "heads-up",
+      `${policy.headsUpDays} days sitting on a piece, or registered with no cover`,
+    ],
+    [
+      "diamonds_start_nudge_days",
+      "unread nudge",
+      `${policy.nudgeDays} days of unopened feedback`,
+    ],
   ] as const;
-
-  const cliff = lastRound0At(readout.timeline, policy);
 
   const lines = [
     `**${cycleName(readout.timeline)} — setup**`,
     "",
     `**Timeline** (${readout.timeZone})`,
     `${mark(readout.dateSources.opensAt ?? "default")} opens — ${day(readout.timeline.opensAt)}`,
-    `${mark(readout.dateSources.closesAt ?? "default")} closes — ${day(readout.timeline.closesAt)}`,
-    `· last useful Round 0 — ${day(cliff)} *(derived, not set)*`,
+    `· nothing closes — membership is enforced per person, Jan 1 / Jul 1`,
     "",
     "**Numbers**",
     ...policyRows.map(
@@ -616,10 +795,6 @@ export function configReadout(readout: {
       readout.enabled ? "**on**" : "off, so every subcommand but this one refuses"
     }`,
   ];
-
-  if (readout.problems.length > 0) {
-    lines.push("", "**This timeline can't be run:**", ...readout.problems.map((one) => `❌ ${one}`));
-  }
 
   // A dot rather than a cross against a default: shipping-default is a
   // perfectly good answer when it matches the announcement, and the only way
@@ -716,8 +891,11 @@ export function ballotReceipt(
     );
     if (counted.verdict !== "split") {
       lines.push(
-        record.document?.deliveredAt
-          ? `Sent — the verdict went out inside their feedback.`
+        record.document?.readAt
+          ? `Sent, and they've opened it — Round 1 is open for them.`
+          : record.document?.deliveredAt
+            ? `Sent, **not opened yet**. Round 1 doesn't open until they read ` +
+              `it; they get one nudge about that and then it's theirs.`
           : record.document
             ? `Their feedback is written and goes out with this. Nothing has ` +
               `reached them yet.`
@@ -935,6 +1113,22 @@ function reviewRows(
     });
   }
 
+  // The branch. A Round 1 that didn't move is a fail, and this is the other
+  // thing you can do about it: carry them into Round 2 with nothing at stake.
+  //
+  // Only here, and only on a fail. It's offered at the moment the decision is
+  // actually in front of someone, rather than as a policy decided in advance
+  // about a dancer nobody has watched yet — and it changes the round that
+  // hasn't happened, which is why it can't be a second verdict on this one.
+  if (round === 1 && settled?.outcome === "failed" && !anyPractice(record)) {
+    buttons.push({
+      type: ComponentType.BUTTON,
+      style: ButtonStyle.SECONDARY,
+      label: "Carry on as practice",
+      custom_id: diamondsCustomId("carry", id),
+    });
+  }
+
   return [{ type: ComponentType.ACTION_ROW, components: buttons }];
 }
 
@@ -946,6 +1140,17 @@ function reviewAsk(
   opts: ReviewOptions,
 ): string {
   if (roundOf(record, round).resultSentAt) return `Done — nothing owed on this one.`;
+
+  // Practice still wants both reads — they're what the feedback is built from —
+  // but it's worth saying out loud that there's no decision at the end of them,
+  // because the card otherwise looks exactly like one that needs deciding.
+  if (isPractice(record, round)) {
+    const outstanding = Math.max(0, opts.minScores - counted.count);
+    return outstanding === 0
+      ? `**Practice — nothing to decide.** Both reads in; write the feedback and send it.`
+      : `**Practice — nothing to decide.** ${counted.count} of ${opts.minScores} ` +
+          `reads in. Score it anyway: the numbers are what the feedback is built from.`;
+  }
 
   const outstanding = Math.max(0, opts.minScores - counted.count);
   const ballots =
@@ -1042,6 +1247,32 @@ export function resultMessage(
     ? `\n\n**What the directors wrote**\n\n${feedback.trim()}`
     : "";
 
+  // Practice says what we saw and stops. No verdict, because there wasn't one —
+  // which is the whole of what a practice dancer asked for, and the one thing
+  // this message must not quietly supply anyway.
+  if (settled.outcome === "practice") {
+    const scored = counted.scores
+      ? `\n\n${DIMENSIONS.map((one) => `· ${DIMENSION_LABEL[one]} — **${counted.scores![one].toFixed(1)}**`).join("\n")}`
+      : counted.targetScore !== undefined
+        ? `\n\n**${record.target ?? "What we were watching"}:** ` +
+          `**${counted.targetScore.toFixed(1)}**` +
+          (record.targetBefore !== undefined
+            ? ` now, against ${record.targetBefore.toFixed(1)} before.`
+            : ".")
+        : "";
+    return (
+      `**${name} — Round ${round}, practice**\n\n` +
+      `📝 **Here's what we saw.** This one was practice, so there's no pass or ` +
+      `fail in it and nothing rides on the numbers — they're there because a ` +
+      `read you can't see isn't feedback.${scored}\n\n` +
+      (round === 2
+        ? `That's the end of the run. Nothing is recorded against you, and you ` +
+          `can audition for real whenever you want to.`
+        : `Your next piece will arrive here the same way.`) +
+      notes
+    );
+  }
+
   if (round === 1) {
     const moved = settled.advancement;
     const delta = moved
@@ -1057,11 +1288,23 @@ export function resultMessage(
           `\n\nYour final piece will arrive here. Everyone dances the same one, you ` +
           `get it privately when you start, and you'll have ${ctx.windowDays} days.` +
           notes
-      : `**${name} — Round 1**\n\n🚫 **Not through to Round 2 this time.**${delta}\n\n` +
-          `That's the one thing this round measured, and it didn't move enough to ` +
-          `carry you forward. It isn't a verdict on you as a dancer and it isn't ` +
-          `the end of anything — keep working on it, and audition again. We'd ` +
-          `rather you did.` + notes;
+      : record.practiceFrom === 2
+        ? // Carried on. The fail is still said plainly — softening it here is
+          // what would make the offer feel like a consolation prize.
+          `**${name} — Round 1**\n\n🚫 **That didn't move enough to carry you ` +
+            `into Round 2 for real.**${delta}\n\n` +
+            `**We'd like you to do Round 2 anyway, as practice.** Same piece as ` +
+            `everyone, same ${ctx.windowDays} days, same written feedback — and ` +
+            `no pass or fail at the end of it, because this run is already ` +
+            `decided. Nothing is recorded against you and nothing stops you ` +
+            `auditioning again.\n\n` +
+            `Your piece will arrive here. If you'd rather stop, that's completely ` +
+            `fine — tell a director.` + notes
+        : `**${name} — Round 1**\n\n🚫 **Not through to Round 2 this time.**${delta}\n\n` +
+            `That's the one thing this round measured, and it didn't move enough to ` +
+            `carry you forward. It isn't a verdict on you as a dancer and it isn't ` +
+            `the end of anything — keep working on it, and audition again. We'd ` +
+            `rather you did.` + notes;
   }
 
   const scores = counted.scores;

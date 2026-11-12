@@ -20,35 +20,29 @@
  */
 import { slotInstant } from "../applications/interviewSlot";
 import { getNumber, getTimeZone } from "../config/settings";
-import { daysStillNeeded, DEFAULT_WEIGHTS, type DiamondsTimeline, type Weights } from "./audition";
+import { DEFAULT_WEIGHTS, type DiamondsTimeline, type Weights } from "./audition";
 import type { Env } from "../env";
 
 /**
- * The two days the announcement was written from. Change these and the
- * announcement together, or neither.
+ * The day the announcement was written from. Change it and the announcement
+ * together, or neither.
  */
 const DEFAULT_DAYS = {
   opensAt: "2026-11-15",
-  closesAt: "2027-01-10",
 } as const;
 
 export type DateKey = keyof typeof DEFAULT_DAYS;
 
 const KV_KEY: Record<DateKey, string> = {
   opensAt: "config:diamonds.opens",
-  closesAt: "config:diamonds.closes",
 };
 
 /**
- * Opening is the start of its day; closing is the end of its own.
- *
- * Both are what the announcement means. Nobody reads "auditions open NOV 15" as
- * "late on the 15th", and everyone reads "closes JAN 10" as "any time on the
- * 10th".
+ * Opening is the start of its day, which is what the announcement means —
+ * nobody reads "auditions open NOV 15" as "late on the 15th".
  */
 const TIME_OF_DAY: Record<DateKey, string> = {
   opensAt: "00:01",
-  closesAt: "23:59",
 };
 
 const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
@@ -74,39 +68,9 @@ export function resolveTimeline(
     return slotInstant(day, TIME_OF_DAY[key], timeZone).toISOString();
   };
 
-  return { opensAt: one("opensAt"), closesAt: one("closesAt") };
+  return { opensAt: one("opensAt") };
 }
 
-/**
- * Whether the configured timeline is long enough to run.
- *
- * Checked rather than trusted, because the two timeline are set one at a time: a
- * close date pulled in without looking leaves a window nobody can get three
- * rounds into, and the first person to find out would otherwise be a dancer.
- */
-export function timelineProblems(
-  timeline: DiamondsTimeline,
-  policy: { windowDays: number; reviewMaxDays: number },
-): string[] {
-  const problems: string[] = [];
-  const span =
-    (new Date(timeline.closesAt).getTime() - new Date(timeline.opensAt).getTime()) /
-    (24 * 60 * 60 * 1000);
-
-  if (span <= 0) {
-    problems.push("Auditions close before they open.");
-    return problems;
-  }
-
-  const needed = daysStillNeeded(policy);
-  if (span < needed) {
-    problems.push(
-      `The timeline is ${Math.floor(span)} days, and getting through three rounds ` +
-        `takes ${needed} — nobody could finish even by starting on day one.`,
-    );
-  }
-  return problems;
-}
 
 export async function getDiamondsTimeline(env: Env): Promise<DiamondsTimeline> {
   const keys = Object.keys(KV_KEY) as DateKey[];
@@ -150,6 +114,8 @@ export interface DiamondsPolicy {
   noticeDays: number[];
   /** Months before someone who didn't pass may register again. */
   retryMonths: number;
+  /** Days to finish all three rounds, counted from registration. */
+  runDays: number;
   weights: Weights;
 }
 
@@ -168,6 +134,7 @@ export async function getDiamondsPolicy(env: Env): Promise<DiamondsPolicy> {
     noticeSecond,
     noticeFinal,
     retryMonths,
+    runDays,
   ] = await Promise.all([
     getNumber(env, "diamonds_window_days"),
     getNumber(env, "diamonds_bar"),
@@ -182,6 +149,7 @@ export async function getDiamondsPolicy(env: Env): Promise<DiamondsPolicy> {
     getNumber(env, "diamonds_notice_second"),
     getNumber(env, "diamonds_notice_final"),
     getNumber(env, "diamonds_retry_months"),
+    getNumber(env, "diamonds_run_days"),
   ]);
   // Weights stay in code. They're the shape of the rubric rather than a
   // threshold — moving the bar is a cycle decision, re-weighting the dimensions
@@ -203,6 +171,7 @@ export async function getDiamondsPolicy(env: Env): Promise<DiamondsPolicy> {
       (a, b) => a - b,
     ),
     retryMonths,
+    runDays,
     weights: DEFAULT_WEIGHTS,
   };
 }
@@ -222,7 +191,6 @@ export interface DiamondsConfigReadout {
   timeZone: string;
   roleConfigured: boolean;
   enabled: boolean;
-  problems: string[];
 }
 
 const POLICY_KEYS = [
@@ -258,6 +226,24 @@ export async function getDiamondsRoleId(env: Env): Promise<string | null> {
   return raw?.trim() ? raw.trim() : null;
 }
 
+/**
+ * The "Diamond Director" role, or nothing.
+ *
+ * Exemption from the renewal ladder is a property of being one of the two
+ * people who judge it, not of being a director of the team — the director list
+ * covers rank 7's cycles and rank 12's auditions too, and someone on it who
+ * isn't judging Diamonds should be held to their date like anyone else.
+ *
+ * Nothing means **nobody is exempt**, which is the safe default in the same way
+ * the sweep's empty director list was: an exemption nobody configured would be
+ * a membership that silently never gets enforced, and a notice the two of them
+ * can ignore costs nothing.
+ */
+export async function getDiamondDirectorRoleId(env: Env): Promise<string | null> {
+  const raw = await env.KV.get("config:role.diamonds_director");
+  return raw?.trim() ? raw.trim() : null;
+}
+
 export async function inspectDiamondsConfig(env: Env): Promise<DiamondsConfigReadout> {
   const dateKeys = Object.keys(KV_KEY) as DateKey[];
   const [timeZone, timeline, policy, enabledRaw, roleRaw, ...raw] = await Promise.all([
@@ -288,12 +274,11 @@ export async function inspectDiamondsConfig(env: Env): Promise<DiamondsConfigRea
     timeZone,
     roleConfigured: /^\d+$/.test((roleRaw ?? "").trim()),
     enabled: enabledRaw === "true" || enabledRaw === "1",
-    problems: timelineProblems(timeline, policy),
   };
 }
 
 /**
- * Writes one or both days.
+ * Writes the open date.
  *
  * Validated and then re-read rather than written blind: the whole point of
  * having this is to find out the timeline is wrong before a dancer does.

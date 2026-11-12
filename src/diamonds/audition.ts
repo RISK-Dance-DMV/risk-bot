@@ -224,6 +224,16 @@ export interface RoundRecord {
  * announcement explicitly invites people to keep going after not advancing, so
  * "didn't advance but is still in" has to be representable.
  */
+/**
+ * How a round ended.
+ *
+ * **"practice" means nothing was decided**, which is a change: it used to mean
+ * "didn't advance at Round 1, and that's the end of it, gently". That was a
+ * dead end dressed as kindness — the audition was over either way, and the
+ * softer word only made it harder to tell. Not advancing is now an explicit
+ * `failed`, with a director's option to carry on as practice instead, and
+ * "practice" is reserved for a round that was never being judged.
+ */
 export type RoundOutcome = "advanced" | "practice" | "passed" | "failed";
 
 /** Round 0's ballot: a judgment, not a measurement. */
@@ -286,8 +296,22 @@ export interface FeedbackDocument {
   growthAreas: string[];
   writtenBy: string;
   submittedAt: string;
-  /** Set when it has actually reached the dancer. */
+  /** Set when the notice that it exists actually reached the dancer. */
   deliveredAt?: string;
+  /**
+   * Set when they opened it, which is what opens Round 1.
+   *
+   * Delivered and read are two different facts, and the round turns on the
+   * second one. Round 1 asks what someone did about a named weakness; a
+   * document sitting unopened in a DM has named nothing to anybody, so keying
+   * the round to delivery was keying it to our side of the exchange rather than
+   * theirs. This way the clock they control starts when they've actually got
+   * the thing, and `/diamonds roster` can tell "we owe them feedback" apart
+   * from "they haven't opened it".
+   */
+  readAt?: string;
+  /** So the unread nudge goes once rather than every morning. */
+  readNudgedAt?: string;
 }
 
 export interface DiamondsRecord {
@@ -377,6 +401,26 @@ export interface DiamondsRecord {
    * to; this field is what remains as the fact that it happened.
    */
   lapsedAt?: string;
+  /**
+   * The first round that isn't judged — see `isPractice`.
+   *
+   * `0` is the dancer's own choice at registration; `2` is a director carrying
+   * them on after a Round 1 fail. Undefined is the normal case.
+   */
+  practiceFrom?: Round;
+  /**
+   * Days a director has added to the two-month run, one entry per grant.
+   *
+   * A list rather than a running total, for the same reason a round keeps its
+   * own `extension`: the question asked afterwards is "who gave them another
+   * fortnight, and why", and a number can't answer it. The total is derived in
+   * `runEndsAt`.
+   */
+  runExtensions?: Extension[];
+  /** Set when the run ran out with the audition unfinished. */
+  expiredAt?: string;
+  /** So the "your two months are nearly up" warning goes once. */
+  runWarnedAt?: string;
   withdrawnAt?: string;
 }
 
@@ -387,6 +431,79 @@ export interface DiamondsRecord {
  * target is only meaningful beside the ballots that scored it, and the Round 0
  * document is only meaningful beside the cover it was written about.
  */
+/**
+ * The first round that isn't being judged, or nothing.
+ *
+ * Two ways in, and they're the same fact from different directions. A dancer
+ * can say at registration that the whole thing is practice (`0`), and a
+ * director can offer it at Round 1 after a fail, which carries into Round 2
+ * (`2`). Stored as the round it starts from rather than a boolean so a card can
+ * say *where* it started — "practice from Round 2" and "practice throughout"
+ * are different conversations.
+ */
+export function isPractice(record: DiamondsRecord, round: Round): boolean {
+  return record.practiceFrom !== undefined && round >= record.practiceFrom;
+}
+
+/** Whether any part of this audition is practice. */
+export function anyPractice(record: DiamondsRecord): boolean {
+  return record.practiceFrom !== undefined;
+}
+
+/**
+ * The instant their whole run is due by, or nothing if they have no clock.
+ *
+ * Counted from registration rather than from the first submission, because the
+ * clock has to cover the part people actually lose time to — the stretch
+ * between putting your name down and getting round to Round 0. Registering
+ * again resets it, since that is a new audition.
+ *
+ * Nothing for a record with no `registeredAt`, which is any record written
+ * before this existed: inventing a deadline for somebody who was never told
+ * about one is worse than having no deadline.
+ */
+export function runEndsAt(record: DiamondsRecord, runDays: number): string | undefined {
+  if (!record.registeredAt || runDays <= 0) return undefined;
+  const added = (record.runExtensions ?? []).reduce((sum, one) => sum + one.days, 0);
+  return addDays(record.registeredAt, runDays + added);
+}
+
+/**
+ * Whether the clock has run out on an audition that hasn't finished.
+ *
+ * Finished ones are excluded rather than ignored: a pass on day 59 is a pass,
+ * and a record that has already ended has nothing left for a deadline to do.
+ */
+export function runExpired(record: DiamondsRecord, runDays: number, now: Date): boolean {
+  if (auditionFinished(record)) return false;
+  const ends = runEndsAt(record, runDays);
+  if (!ends) return false;
+  return now.getTime() > new Date(ends).getTime();
+}
+
+/** Days left on the run, rounded up, or nothing if they have no clock. */
+export function runDaysLeft(
+  record: DiamondsRecord,
+  runDays: number,
+  now: Date,
+): number | undefined {
+  const ends = runEndsAt(record, runDays);
+  return ends === undefined ? undefined : daysUntil(ends, now);
+}
+
+/**
+ * Whether a fail at this round was one they were carried out of.
+ *
+ * Round 1 can fail and the audition still go on: the directors send the fail
+ * *and* carry them into Round 2 as practice. Both things are true, and the
+ * record keeps both — the round says `failed`, and practice starting at 2 says
+ * it wasn't the end. Overwriting the fail with "practice" would have been
+ * tidier and would have lost the only honest reading of what happened.
+ */
+export function carriedPast(record: DiamondsRecord, round: Round): boolean {
+  return record.practiceFrom !== undefined && record.practiceFrom > round;
+}
+
 export interface FinishedAudition {
   rounds: Partial<Record<Round, RoundRecord>>;
   target?: string;
@@ -414,64 +531,26 @@ function addDays(iso: string, days: number): string {
 /* -------------------------------------------------------------------------- */
 
 /**
- * Two timeline, not five.
+ * One date, not five.
  *
  * An earlier design ran the rounds as cohort-wide phases: everybody's Round 1
- * opened on one day and closed on another. That was five configured timeline, and
+ * opened on one day and closed on another. That was five configured dates, and
  * it bought nothing — the audition is **pass/fail against a fixed bar**, so
  * nobody is being compared to anybody, and the only thing the phases actually
  * did was make people wait for each other.
  *
- * So: one window, and everyone moves through the three rounds at their own
- * pace. Which round you're in is a fact about your record, not about today's
- * date — see `activeRound`.
+ * Then the close date went too. It was the last thing in here that applied to
+ * everyone at once, and under rolling membership it had nothing left to mean:
+ * people arrive and renew on their own enforcement dates, so a shared "last day
+ * any window may shut" was refusing registrations and submissions on behalf of
+ * a cycle that no longer exists. What's left is when the thing opened.
+ *
+ * Which round you're in is a fact about your record, not about today's date —
+ * see `activeRound`.
  */
 export interface DiamondsTimeline {
   /** When registration and Round 0 open. */
   opensAt: string;
-  /** The last moment any window, in any round, may close. */
-  closesAt: string;
-}
-
-/**
- * The last instant a window of `windowDays` may start and still close in time.
- *
- * One number for all three rounds now, because they all end at the same place.
- */
-export function lastStartAt(closesAt: string, windowDays: number): string {
-  return addDays(closesAt, -windowDays);
-}
-
-/**
- * How long three rounds take at worst, from a Round 0 submission.
- *
- * Two reviews and two windows. There is no separate working gap to add any
- * more: Round 1 is gated on the feedback arriving rather than on a countdown,
- * so the only waiting the process imposes is the reviewing, and whatever time
- * someone takes with their feedback is time they chose to take.
- *
- * Uses the slow end of the review range, because this number's job is to decide
- * whether someone still has room — and a cutoff computed from the optimistic
- * case would let people in who then run out of time through nobody's fault.
- */
-export function daysStillNeeded(policy: {
-  windowDays: number;
-  reviewMaxDays: number;
-}): number {
-  return policy.reviewMaxDays + policy.windowDays + policy.reviewMaxDays + policy.windowDays;
-}
-
-/**
- * The last day a Round 0 submission still leaves room for Rounds 1 and 2.
- *
- * Derived, and the honest thing to put in the announcement: there is no Round 0
- * "deadline" any more, there's a point past which three rounds no longer fit.
- */
-export function lastRound0At(
-  timeline: DiamondsTimeline,
-  policy: { windowDays: number; reviewMaxDays: number },
-): string {
-  return addDays(timeline.closesAt, -daysStillNeeded(policy));
 }
 
 export type ActiveRound = { ok: true; round: Round } | Refusal;
@@ -519,10 +598,11 @@ export function activeRound(record: DiamondsRecord, now: Date): ActiveRound {
     };
   }
 
-  // A round that ended badly ends the audition, whichever round it was.
+  // A fail ends the audition, whichever round it was. A practice round doesn't:
+  // nothing was decided, so there is nothing to have ended on.
   for (const round of [1, 0] as Round[]) {
     const outcome = roundOf(record, round).outcome;
-    if (outcome === "practice" || outcome === "failed") {
+    if (outcome === "failed" && !carriedPast(record, round)) {
       return {
         ok: false,
         reason: `Your audition finished at Round ${round} — your feedback has been sent.`,
@@ -538,7 +618,7 @@ export function activeRound(record: DiamondsRecord, now: Date): ActiveRound {
   }
   if (first.submittedAt) return { ok: true, round: 2 };
 
-  return record.document?.deliveredAt
+  return record.document?.readAt
     ? { ok: true, round: 1 }
     : { ok: true, round: 0 };
 }
@@ -565,13 +645,64 @@ export function activeRound(record: DiamondsRecord, now: Date): ActiveRound {
  */
 export function feedbackReady(record: DiamondsRecord, round: Round): Check {
   if (round !== 1) return { ok: true };
-  if (record.document?.deliveredAt) return { ok: true };
+  if (record.document?.readAt) return { ok: true };
+
+  // Two refusals rather than one, because they are two completely different
+  // situations and only one of them is ours. Telling someone their feedback
+  // hasn't arrived when it is sitting unopened in their DMs sends them to ask a
+  // director about a message they already have.
+  if (record.document?.deliveredAt) {
+    return {
+      ok: false,
+      reason:
+        "Your feedback is in your DMs and hasn't been opened yet — open it and " +
+        "Round 1 starts. It's a read, not a commitment: your window still only " +
+        "starts when you press the button.",
+    };
+  }
   return {
     ok: false,
     reason:
       "Your feedback hasn't reached you yet, and Round 1 is a response to it — " +
       "there's nothing to work on until it arrives. Nothing's wrong on your end.",
   };
+}
+
+/**
+ * Whether the feedback has *gone out* — a director's side of the same rule.
+ *
+ * Separate from `feedbackReady` on purpose, and the split matters: putting the
+ * piece up is a director's job and must not wait on a dancer's inbox, while
+ * starting the window is the dancer's and does. So the piece can be assigned
+ * the moment the document is sent, and sits there until they read it — which
+ * is the state the review card now reports.
+ */
+export function feedbackSentOut(record: DiamondsRecord, round: Round): Check {
+  if (round !== 1) return { ok: true };
+  if (record.document?.deliveredAt) return { ok: true };
+  return {
+    ok: false,
+    reason: "Their feedback hasn't gone out yet, and Round 1 is a response to it.",
+  };
+}
+
+/**
+ * Delivered, not opened, and old enough to be worth a word.
+ *
+ * The one new way to get stuck. Everything else in this process waits on a
+ * director or on a window; this waits on a dancer doing nothing in particular,
+ * which is exactly the state nobody notices themselves being in.
+ */
+export function feedbackUnread(
+  record: DiamondsRecord,
+  afterDays: number,
+  now: Date,
+): boolean {
+  const doc = record.document;
+  if (!doc?.deliveredAt || doc.readAt || doc.readNudgedAt) return false;
+  if (record.withdrawnAt) return false;
+  const due = new Date(doc.deliveredAt).getTime() + afterDays * 24 * 60 * 60 * 1000;
+  return now.getTime() >= due;
 }
 
 
@@ -710,7 +841,6 @@ export function startWarning(reveal: Reveal, windowDays: number): string {
 export function canStartWindow(
   record: DiamondsRecord,
   round: Round,
-  closesAt: string,
   windowDays: number,
   now: Date,
 ): Check {
@@ -740,15 +870,11 @@ export function canStartWindow(
   const feedback = feedbackReady(record, round);
   if (!feedback.ok) return feedback;
 
-  const last = lastStartAt(closesAt, windowDays);
-  if (now.getTime() > new Date(last).getTime()) {
-    return {
-      ok: false,
-      reason:
-        `Too late to start a ${windowDays}-day window — auditions close ` +
-        `${closesAt} and it wouldn't shut before then.`,
-    };
-  }
+  // Nothing about the calendar. There used to be a refusal here for a window
+  // that wouldn't shut before the audition closed, and with the close date gone
+  // so is the only reason this could ever have been "too late": each person's
+  // deadline is their own enforcement date now, which re-auditioning moves
+  // forward rather than runs into.
   return { ok: true };
 }
 
@@ -774,41 +900,7 @@ export function canSubmit(
   return pieceReady(entry);
 }
 
-/**
- * Round 0 is not a window, so it isn't checked like one.
- *
- * Nobody is assigned anything and nobody starts a clock: the whole week is the
- * window. Reusing `canSubmit` here would refuse everyone for having no piece,
- * which is true and useless — so this checks the only thing that governs Round
- * 0, which is whether the week is over.
- *
- * Replacing an earlier submission is allowed, deliberately. The piece is their
- * own choice and re-recording it costs the process nothing, so the deadline is
- * the only thing anyone has to respect. Rounds 1 and 2 refuse a second
- * submission, because there the recording is the timed part.
- */
-export function canSubmitRound0(closesAt: string, now: Date): Check {
-  if (now.getTime() > new Date(closesAt).getTime()) {
-    return { ok: false, reason: "Auditions have closed." };
-  }
-  return { ok: true };
-}
 
-/**
- * Whether a Round 0 submitted now still leaves room for Rounds 1 and 2.
- *
- * A warning rather than a refusal. Anyone may audition for the feedback alone —
- * the announcement says so — and someone who turns up in January knowing they
- * can't finish is making a choice, not a mistake. What they shouldn't do is
- * find out afterwards.
- */
-export function roomForThreeRounds(
-  timeline: DiamondsTimeline,
-  policy: { windowDays: number; reviewMaxDays: number },
-  now: Date,
-): boolean {
-  return now.getTime() <= new Date(lastRound0At(timeline, policy)).getTime();
-}
 
 /** The reminder goes out a day before their own window shuts, once. */
 export function needsReminder(
@@ -823,56 +915,24 @@ export function needsReminder(
   return left > 0 && left <= 24 * 60 * 60 * 1000;
 }
 
-/**
- * The last-chance nudge: the cliff is coming and they still haven't started.
- *
- * Absolute, because the cliff is absolute — every window in every round has to
- * shut by the same moment, so there is one last start date and it belongs to
- * everyone. This is the only message keyed to the calendar rather than to the
- * person.
- */
-export function needsStartNudge(
-  entry: RoundRecord,
-  closesAt: string,
-  windowDays: number,
-  nudgeDays: number,
-  now: Date,
-): boolean {
-  if (entry.windowOpenedAt || entry.submittedAt || entry.startNudgedAt) return false;
-  if (!entry.assignedPiece) return false;
-  const last = new Date(lastStartAt(closesAt, windowDays)).getTime();
-  const left = last - now.getTime();
-  return left > 0 && left <= nudgeDays * 24 * 60 * 60 * 1000;
-}
 
 /**
- * The earlier, gentler one: your piece has been sitting there for a while.
+ * Your piece has been sitting there for a while.
  *
- * Counted from when their window became *startable*, not from the cliff. Under
- * rolling rounds the cliff can be two months off, so a nudge pegged to it would
- * let someone sit on an assigned piece for seven weeks in silence. "It's been
- * ten days" is a fact about them, which is the only kind of fact worth a DM
- * here.
- *
- * Suppressed when the last-chance nudge is also due, which happens to anyone
- * assigned a piece close to the cliff: two DMs in one morning reads as a system
- * with a bug rather than a team paying attention.
+ * "It's been ten days" is a fact about them rather than about the calendar,
+ * which is the only kind of fact worth a DM in a rolling process — and with the
+ * shared close date gone it is the only nudge left that can reach someone who
+ * is simply not starting.
  */
 export function needsStartHeadsUp(
   record: DiamondsRecord,
   round: Round,
-  closesAt: string,
-  windowDays: number,
   headsUpDays: number,
-  nudgeDays: number,
   now: Date,
 ): boolean {
   const entry = roundOf(record, round);
   if (entry.windowOpenedAt || entry.submittedAt || entry.startHeadsUpAt) return false;
   if (!entry.assignedPiece) return false;
-  if (needsStartNudge({ ...entry, startNudgedAt: undefined }, closesAt, windowDays, nudgeDays, now)) {
-    return false;
-  }
 
   // Counted from the assignment, which is also when the feedback went out —
   // the two are the same sitting, and Round 1's gate is the feedback.
@@ -891,8 +951,6 @@ export function needsStartHeadsUp(
 export function canPlanStart(
   record: DiamondsRecord,
   round: Round,
-  timeline: DiamondsTimeline,
-  policy: { windowDays: number },
   day: string,
   now: Date,
 ): Check {
@@ -907,16 +965,9 @@ export function canPlanStart(
     return { ok: false, reason: "That day has already gone — pick one from today onwards." };
   }
 
-  const last = new Date(lastStartAt(timeline.closesAt, policy.windowDays)).getTime();
-  if (at > last + 12 * 60 * 60 * 1000) {
-    return {
-      ok: false,
-      reason:
-        `Too late — a ${policy.windowDays}-day window started then wouldn't shut ` +
-        `before auditions close. The last day to start anything is ` +
-        `${lastStartAt(timeline.closesAt, policy.windowDays).slice(0, 10)}.`,
-    };
-  }
+  // No upper bound either, now that nothing shared closes. A date two months
+  // out is a reasonable thing for someone renewing to plan, and the only clock
+  // it could collide with is their own enforcement date — which they can see.
 
   // No lower bound beyond today: Round 1's gate is the feedback arriving, not a
   // date, and someone planning ahead of it is making a reasonable guess about
@@ -945,25 +996,28 @@ export function needsPlanReminder(
 /**
  * And the one for someone who registered and then never submitted Round 0.
  *
- * No window to key off and no piece to wait on — just a registration and a
- * closing door. Pegged to the point past which three rounds no longer fit,
- * because that is the moment their plan stops being possible.
+ * Counted from their registration, because there is no closing door to count
+ * back from any more. It used to fire a few days before the point past which
+ * three rounds no longer fit, which was the right nudge while the audition was
+ * a cycle; rolling, the only honest version is "you put your name down ten days
+ * ago and we've not seen anything".
+ *
+ * Still only newcomers. A returning Diamond owes no cover, so there is nothing
+ * for them to have not sent.
  */
 export function needsRound0Nudge(
   record: DiamondsRecord,
-  timeline: DiamondsTimeline,
-  policy: { windowDays: number; reviewMaxDays: number },
-  nudgeDays: number,
+  afterDays: number,
   now: Date,
 ): boolean {
   if (record.withdrawnAt) return false;
   if (record.cohort === "returning") return false;
   const zero = roundOf(record, 0);
   if (zero.submittedAt || zero.startNudgedAt) return false;
+  if (!record.registeredAt) return false;
 
-  const cliff = new Date(lastRound0At(timeline, policy)).getTime();
-  const left = cliff - now.getTime();
-  return left > 0 && left <= nudgeDays * 24 * 60 * 60 * 1000;
+  const waited = now.getTime() - new Date(record.registeredAt).getTime();
+  return waited >= afterDays * 24 * 60 * 60 * 1000;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1084,8 +1138,39 @@ export interface Advancement {
   after: number;
   /** Change on the targeted weakness, in anchor steps. */
   steps: number;
+  /** What they had to reach, so the card and the feedback can say it. */
+  needed: number;
   /** Which branch of the rule carried it, for the card and the feedback. */
   because: "improved" | "already-there" | "no-movement";
+}
+
+/**
+ * The number Round 1 has to reach, given where the thing started.
+ *
+ * **The worse it is, the more it has to move.** A flat one-step ask was the
+ * same demand at 3 as at 7, which is the wrong way round twice over: a step at
+ * the bottom is the easiest kind of progress to make and the least evidence of
+ * being ready, and a step at the top is the hardest and the most. So the ask is
+ * **half the distance to the bar**, floored at `requiredSteps` anchor steps so
+ * it never becomes a rounding error, and capped at the bar itself.
+ *
+ * The cap is what removes a cliff the flat rule had. Under it, somebody at 7
+ * needed 8.25 — *above* the bar — while somebody at 7.5 only had to hold still,
+ * so the hardest place in the whole scale to start was just underneath the bar.
+ * Nothing here ever asks anyone to beat the bar in a round that isn't about the
+ * bar.
+ *
+ * At or above the bar the ask is to still have it: there is no "improve on 9"
+ * that means anything at this resolution.
+ */
+export function targetToBeat(
+  before: number,
+  bar: number,
+  requiredSteps: number,
+): number {
+  if (before >= bar) return before;
+  const half = (bar - before) / 2;
+  return Math.min(bar, before + Math.max(requiredSteps * ANCHOR_STEP, half));
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1106,7 +1191,11 @@ export interface Advancement {
 export function auditionFinished(record: DiamondsRecord): boolean {
   // Dropping it ends it. Before this, a withdrawn audition stayed open for ever
   // and coming back resumed it mid-round, holding last cycle's piece.
-  return !!record.withdrawnAt || auditionResulted(record);
+  //
+  // So does running out of time, for the same reason withdrawing does: an
+  // audition that stays open indefinitely is one where a Round 1 read taken in
+  // November gets compared to a Round 2 danced in April.
+  return !!record.withdrawnAt || !!record.expiredAt || auditionResulted(record);
 }
 
 /**
@@ -1120,10 +1209,11 @@ export function auditionFinished(record: DiamondsRecord): boolean {
  */
 export function auditionResulted(record: DiamondsRecord): boolean {
   if (roundOf(record, 2).resultSentAt) return true;
-  return ([0, 1] as Round[]).some((round) => {
-    const outcome = roundOf(record, round).outcome;
-    return outcome === "failed" || outcome === "practice";
-  });
+  // Only a fail ends it early now. A practice round decided nothing, so there
+  // is nothing for it to have ended — that is the whole point of asking for it.
+  return ([0, 1] as Round[]).some(
+    (round) => roundOf(record, round).outcome === "failed" && !carriedPast(record, round),
+  );
 }
 
 /** The outcome of the last round to have one, which is how the audition ended. */
@@ -1167,18 +1257,29 @@ export function retryBlockedUntil(
   if (months <= 0) return undefined;
   if (!auditionFinished(record)) return undefined;
 
+  // A run that was never being judged can't have failed, however it ended, so
+  // there is nothing to serve. Practice costs nothing — including when someone
+  // asks for practice and then drops it or lets the clock run.
+  if (record.practiceFrom === 0) return undefined;
+
   const ended = endedAs(record);
   // Whichever came last. A result that arrived after they dropped out still
   // counts, and a drop-out with no result at all counts on its own.
-  const from = new Date(
-    record.withdrawnAt && (!ended.finishedAt || record.withdrawnAt > ended.finishedAt)
-      ? record.withdrawnAt
-      : ended.finishedAt ?? "",
-  );
+  // Whichever of the three came last. Running out counts like dropping out —
+  // otherwise letting the clock run would be the quiet way around the wait, and
+  // the wait exists precisely to stop there being one.
+  const stopped = [record.withdrawnAt, record.expiredAt, ended.finishedAt]
+    .filter((one): one is string => !!one)
+    .sort();
+  const from = new Date(stopped[stopped.length - 1] ?? "");
   if (Number.isNaN(from.getTime())) return undefined;
-  if (!record.withdrawnAt && (!ended.outcome || ended.outcome === "passed")) {
+  if (!record.withdrawnAt && !record.expiredAt && (!ended.outcome || ended.outcome === "passed")) {
     return undefined;
   }
+  // Practice costs nothing, which is the deal. Someone who asked not to be
+  // judged hasn't failed anything, so there is no wait to serve — and a wait
+  // after practice would make asking for it the riskier choice.
+  if (!record.withdrawnAt && !record.expiredAt && ended.outcome === "practice") return undefined;
   const until = new Date(
     Date.UTC(
       from.getUTCFullYear(),
@@ -1268,6 +1369,10 @@ export function reAudition(record: DiamondsRecord, at: string): Restart {
       targetBefore: undefined,
       targetFixedAt: undefined,
       document: undefined,
+      // Practice is a choice about *this* audition. Carrying it over would mean
+      // one request for a practice run quietly made every future attempt a
+      // practice run, which nobody would notice until a pass didn't count.
+      practiceFrom: undefined,
       // A member who simply didn't re-audition comes back as `returning` — they
       // were a Diamond and nobody has seen them fail anything. Someone who
       // failed, or who dropped out, comes back as `new` and owes a cover.
@@ -1358,6 +1463,10 @@ export function daysUntil(at: string, now: Date): number {
  */
 export function membershipLapsed(record: DiamondsRecord, now: Date): boolean {
   if (!record.enforcedAt || record.lapsedAt) return false;
+  // Deferred, not cancelled. The date passing while they're mid-audition means
+  // nothing is reassessed until that audition ends — and then this reads true
+  // again on the same date it always did.
+  if (renewalUnderway(record)) return false;
   return new Date(record.enforcedAt).getTime() <= now.getTime();
 }
 
@@ -1424,25 +1533,29 @@ export function noticeDue(
 }
 
 /**
- * Whether they are already in the middle of re-auditioning.
+ * Whether a re-audition is underway, which **defers enforcement entirely**.
  *
- * Nobody mid-audition should be told they are about to be removed: they are
- * doing the exact thing the notice would be asking for, and the notice would
- * read as if the bot hadn't noticed.
+ * An enforcement date that lands in the middle of somebody's re-audition does
+ * not take their role: they are doing the exact thing the date exists to ask
+ * for, and removing them mid-process would be the bot failing to notice its own
+ * request being answered. Nothing is reassessed until the audition ends — the
+ * verdict, or the run closing.
  *
- * Measured as "submitted since membership started, not yet resulted" rather
- * than off a round number, because what counts is work done *this* term. Today
- * nothing can be submitted after a pass — a record ends at Round 2 and there is
- * no second cycle on it — so this is vacuously false and waiting for the
- * re-audition reset to exist.
+ * Measured from the registration rather than from a submission, because the
+ * process starts when they put their name down and the gap before Round 0 is
+ * part of it. That would be open to abuse — register, keep the role, never
+ * submit — except that registering also starts the two-month clock, so the
+ * deferral has an end whether or not they do anything. The clock is what makes
+ * this rule safe; without it this would be a way to stay a Diamond for ever.
+ *
+ * Finished means finished in every sense: a verdict, a withdrawal, or an
+ * expiry. Someone who drops a re-audition stops being protected by it, which is
+ * the decision that keeps "drop it and keep the role" from working.
  */
 export function renewalUnderway(record: DiamondsRecord): boolean {
-  const since = record.memberSince;
-  if (!since) return false;
-  return ROUNDS.some((round) => {
-    const entry = roundOf(record, round);
-    return !!entry.submittedAt && entry.submittedAt > since && !entry.resultSentAt;
-  });
+  if (!record.memberSince || !record.registeredAt) return false;
+  if (auditionFinished(record)) return false;
+  return record.registeredAt > record.memberSince;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1581,14 +1694,30 @@ export function advancesRound1(
   requiredSteps: number,
 ): Advancement {
   const steps = (after - before) / ANCHOR_STEP;
+  const needed = targetToBeat(before, bar, requiredSteps);
 
-  if (steps >= requiredSteps) {
-    return { advanced: true, before, after, steps, because: "improved" };
+  // Already at the bar, so the question is whether it's still there. Kept as
+  // its own branch because it reads differently in the feedback: nobody at 9 is
+  // being told they improved.
+  if (before >= bar) {
+    return {
+      advanced: after >= before,
+      before,
+      after,
+      steps,
+      needed,
+      because: after >= before ? "already-there" : "no-movement",
+    };
   }
-  if (before >= bar && after >= before) {
-    return { advanced: true, before, after, steps, because: "already-there" };
-  }
-  return { advanced: false, before, after, steps, because: "no-movement" };
+
+  return {
+    advanced: after >= needed,
+    before,
+    after,
+    steps,
+    needed,
+    because: after >= needed ? "improved" : "no-movement",
+  };
 }
 
 
@@ -1670,6 +1799,15 @@ export function settleRound(
   if (entry.resultSentAt && entry.outcome) {
     return { outcome: entry.outcome, against: entry.scoredAgainst };
   }
+
+  // Practice settles as practice: there is nothing to derive, because nothing
+  // is being decided. Still waits for both of them — the ballots are what the
+  // feedback is built from, and a practice dancer asked for the feedback.
+  if (isPractice(record, round)) {
+    if (round === 0) return record.document ? { outcome: "practice" } : undefined;
+    return tally(entry, policy.minScores).complete ? { outcome: "practice" } : undefined;
+  }
+
   const counted = tally(entry, policy.minScores);
   if (!counted.complete) return undefined;
 
@@ -1688,10 +1826,13 @@ export function settleRound(
       policy.bar,
       policy.requiredSteps,
     );
+    // Not advancing is a **fail**, and the softer outcome is now a choice
+    // someone makes rather than a word the bot picks: a director reading this
+    // card can send it as a fail, or carry them into Round 2 as practice. Both
+    // used to be the same thing called "practice", which meant the audition was
+    // over and nobody could tell.
     return {
-      // Not "failed". The announcement invites people to keep going after not
-      // advancing, so "didn't advance but is still in" has to be its own thing.
-      outcome: advancement.advanced ? "advanced" : "practice",
+      outcome: advancement.advanced ? "advanced" : "failed",
       advancement,
     };
   }
@@ -1758,6 +1899,10 @@ export function documentReady(record: DiamondsRecord, minScores: number): Check 
   if (!record.document) {
     return { ok: false, reason: "Nothing written yet." };
   }
+  // Practice has no verdict to wait for, so the document *is* the whole of
+  // Round 0 for them and goes as soon as it's written.
+  if (isPractice(record, 0)) return { ok: true };
+
   const counted = tally(roundOf(record, 0), minScores);
   if (!counted.complete || counted.verdict === undefined) {
     return {
@@ -1868,23 +2013,6 @@ export function validateDocument(input: DocumentInput): DocumentResult {
   return { ok: true, strengths, growthAreas, content };
 }
 
-/**
- * Whether a feedback document can still be filed for a returning Diamond.
- *
- * Open for as long as the audition is. Under cohort-wide phases this closed on
- * the day Round 1's pieces went up; rolling, that moment is per person and is
- * enforced where it belongs — a document can't be filed once Round 0's result
- * has gone out, because the result *is* the document.
- *
- * Worth saying plainly because the document *is* a returning Diamond's Round 0:
- * until it has been sent, they have nothing to do and nothing moves.
- */
-export function canFileDocument(closesAt: string, now: Date): Check {
-  if (now.getTime() > new Date(closesAt).getTime()) {
-    return { ok: false, reason: "Auditions have closed." };
-  }
-  return { ok: true };
-}
 
 /**
  * Names Round 1's target and fixes the number it starts from.

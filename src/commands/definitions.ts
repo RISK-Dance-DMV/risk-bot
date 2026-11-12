@@ -341,6 +341,12 @@ export const DIAMONDS_COMMAND = {
           description: "Roughly when you'll send your Round 0 (YYYY-MM-DD) — an estimate, not a commitment",
           required: false,
         },
+        {
+          type: ApplicationCommandOptionType.BOOLEAN,
+          name: "practice",
+          description: "Do all three rounds for feedback only — no pass or fail, nothing recorded",
+          required: false,
+        },
       ],
     },
     {
@@ -392,18 +398,12 @@ export const DIAMONDS_COMMAND = {
     {
       type: ApplicationCommandOptionType.SUB_COMMAND,
       name: "schedule",
-      description: "Directors: set when auditions open and close (YYYY-MM-DD)",
+      description: "Directors: set when auditions opened (YYYY-MM-DD)",
       options: [
         {
           type: ApplicationCommandOptionType.STRING,
           name: "opens",
           description: "First day anyone can register and submit Round 0",
-          required: false,
-        },
-        {
-          type: ApplicationCommandOptionType.STRING,
-          name: "closes",
-          description: "Last day any window, in any round, may close",
           required: false,
         },
       ],
@@ -501,7 +501,7 @@ export const DIAMONDS_COMMAND = {
     {
       type: ApplicationCommandOptionType.SUB_COMMAND,
       name: "extend",
-      description: "Directors: add days to someone's open window",
+      description: "Directors: add days to someone's window, or to their whole run",
       options: [
         {
           type: ApplicationCommandOptionType.USER,
@@ -520,6 +520,16 @@ export const DIAMONDS_COMMAND = {
           name: "reason",
           description: "What happened (recorded, not sent)",
           required: true,
+        },
+        {
+          type: ApplicationCommandOptionType.STRING,
+          name: "scope",
+          description: "This round's window, or their whole audition. Defaults to the window",
+          required: false,
+          choices: [
+            { name: "This round's window", value: "window" },
+            { name: "Their whole audition — reopens it if it closed", value: "run" },
+          ],
         },
         ROUND_OPTION,
       ],

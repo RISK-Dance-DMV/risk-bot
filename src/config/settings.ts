@@ -38,7 +38,8 @@ export type SettingKey =
   | "diamonds_notice_first"
   | "diamonds_notice_second"
   | "diamonds_notice_final"
-  | "diamonds_retry_months";
+  | "diamonds_retry_months"
+  | "diamonds_run_days";
 
 const DEFAULTS: Record<SettingKey, number> = {
   /** Days a "RISK audition process" card waits for a submission before closing. */
@@ -212,6 +213,21 @@ const DEFAULTS: Record<SettingKey, number> = {
    * exception is right is their call to make and not this file's.
    */
   diamonds_retry_months: 6,
+
+  /**
+   * Days to get through all three rounds, counted from registration.
+   *
+   * The one deadline left, and the only kind that still makes sense: it belongs
+   * to one person rather than to a cycle, so it can't make anybody wait for
+   * anybody else. Two months against a process that needs about sixteen days —
+   * the windows, the rounds and our turnaround — which leaves six weeks of
+   * slack for ordinary life and none for drifting.
+   *
+   * It exists because an audition nobody closes is an audition that can stay
+   * open for ever, and a Round 1 read taken in November against a Round 2 danced
+   * in April isn't comparing the same dancer.
+   */
+  diamonds_run_days: 60,
 };
 
 export async function getNumber(env: Env, key: SettingKey): Promise<number> {

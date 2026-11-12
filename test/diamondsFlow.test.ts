@@ -8,13 +8,15 @@ const {
   editMessage,
   alertDirectors,
   removeRole,
+  addRole,
+  memberRoles,
 } =
   vi.hoisted(() => ({
     sendDirectMessage: vi.fn(
       async (
         _env: unknown,
         _userId: string,
-        _payload: { content?: string },
+        _payload: { content?: string; components?: unknown },
       ): Promise<boolean> => true,
     ),
     postToChannelByName: vi.fn(
@@ -27,6 +29,17 @@ const {
         id: "msg1",
         channelId: "chan1",
       }),
+    ),
+    addRole: vi.fn(
+      async (
+        _env: unknown,
+        _guildId: string,
+        _userId: string,
+        _roleId: string,
+      ): Promise<void> => undefined,
+    ),
+    memberRoles: vi.fn(
+      async (_env: unknown, _guildId: string, _userId: string): Promise<string[] | null> => [],
     ),
     removeRole: vi.fn(
       async (
@@ -52,6 +65,8 @@ vi.mock("../src/discord/rest", () => ({
   editMessage,
   alertDirectors,
   removeRole,
+  addRole,
+  memberRoles,
 }));
 
 import {
@@ -59,14 +74,20 @@ import {
   composeFeedback,
   DEFAULT_WEIGHTS,
   feedbackRevealed,
-  lastRound0At,
   roundOf,
+  runDaysLeft,
+  runEndsAt,
+  runExpired,
+  settleRound,
+  tally,
+  type Round,
   type DiamondsRecord,
   type DiamondsTimeline,
 } from "../src/diamonds/audition";
 import {
   ballotReceipt,
   parseDiamondsCustomId,
+  reviewCard,
   rosterReadout,
   roundPanel,
   statusPanel,
@@ -77,7 +98,6 @@ import {
   inspectDiamondsConfig,
   resolveTimeline,
   setDiamondsTimeline,
-  timelineProblems,
   type DiamondsPolicy,
 } from "../src/diamonds/config";
 import {
@@ -85,7 +105,10 @@ import {
   allRecords,
   assignPiece,
   assignToAll,
+  carryAsPractice,
+  extendRun,
   fileFeedback,
+  markFeedbackRead,
   getRecord,
   grantExtension,
   grantMembership,
@@ -181,10 +204,9 @@ const dancer = (over: Partial<DiamondsRecord> = {}): DiamondsRecord => ({
   ...over,
 });
 
-/** The announced timeline, which is also what the defaults resolve to. */
+/** The announced open date, which is also what the default resolves to. */
 const TIMELINE: DiamondsTimeline = {
   opensAt: "2026-11-15T05:01:00.000Z",
-  closesAt: "2027-01-11T04:59:00.000Z",
 };
 
 const POLICY: DiamondsPolicy = {
@@ -199,6 +221,7 @@ const POLICY: DiamondsPolicy = {
   minScores: 2,
   noticeDays: [20, 30, 60],
   retryMonths: 6,
+  runDays: 60,
   weights: DEFAULT_WEIGHTS,
 };
 
@@ -238,7 +261,7 @@ const zeroPassed = (at = "2026-11-17T00:00:00.000Z") => ({
   resultSentAt: at,
 });
 
-/** Feedback that reached them — the thing that opens Round 1. */
+/** Feedback they were told about *and opened* — the thing that opens Round 1. */
 const feedbackSent = (at = "2026-11-18T00:00:00.000Z") => ({
   content: "A good season.",
   strengths: ["held the front line", "learned fast", "showed up"],
@@ -246,6 +269,7 @@ const feedbackSent = (at = "2026-11-18T00:00:00.000Z") => ({
   writtenBy: "d1",
   submittedAt: at,
   deliveredAt: at,
+  readAt: at,
 });
 /** A sweep that said nothing to anybody. */
 /** The roster order the composed feedback follows. */
@@ -256,11 +280,18 @@ const quiet = {
   headsUp: 0,
   round0: 0,
   planned: 0,
+  unread: 0,
+  warned: 0,
+  expired: 0,
   renewals: 0,
   lapsed: 0,
   blocked: 0,
 };
 const OPEN = new Date("2026-11-18T00:00:00Z");
+/** The morning after, when they open the document. */
+const REVIEWED = new Date("2026-11-19T09:00:00Z");
+/** And later still, when they come back to it mid-window. */
+const LATER = new Date("2026-11-24T09:00:00Z");
 
 beforeEach(() => {
   sendDirectMessage.mockClear();
@@ -270,15 +301,17 @@ beforeEach(() => {
   alertDirectors.mockClear();
   removeRole.mockClear();
   removeRole.mockResolvedValue(undefined);
+  addRole.mockClear();
+  addRole.mockResolvedValue(undefined);
+  // Nobody is a Diamond Director unless a test says so.
+  memberRoles.mockClear();
+  memberRoles.mockResolvedValue([]);
 });
 
 describe("the timeline", () => {
-  it("opens at the start of its day and closes at the end of its own", () => {
-    const resolved = resolveTimeline({}, "America/New_York");
-    // 00:01 and 23:59 in New York, which is what the announcement means by
-    // "opens NOV 15" and "closes JAN 10".
-    expect(resolved.opensAt).toBe("2026-11-15T05:01:00.000Z");
-    expect(resolved.closesAt).toBe("2027-01-11T04:59:00.000Z");
+  it("opens at the start of its day", () => {
+    // 00:01 in New York, which is what the announcement means by "opens NOV 15".
+    expect(resolveTimeline({}, "America/New_York").opensAt).toBe("2026-11-15T05:01:00.000Z");
   });
 
   /**
@@ -292,18 +325,16 @@ describe("the timeline", () => {
 
   it("falls back to the announced day when an override is malformed", () => {
     const warn = vi.spyOn(console, "error").mockImplementation(() => {});
-    expect(resolveTimeline({ closesAt: "Jan 10th" }, "America/New_York").closesAt).toBe(
-      TIMELINE.closesAt,
+    expect(resolveTimeline({ opensAt: "Nov 15th" }, "America/New_York").opensAt).toBe(
+      TIMELINE.opensAt,
     );
     expect(warn).toHaveBeenCalled();
     warn.mockRestore();
   });
 
   it("takes an override that is a real date", async () => {
-    const { env } = envWith({ "config:diamonds.closes": "2027-01-24" });
-    const resolved = await getDiamondsTimeline(env);
-    expect(resolved.closesAt).toBe("2027-01-25T04:59:00.000Z");
-    expect(resolved.opensAt).toBe(TIMELINE.opensAt);
+    const { env } = envWith({ "config:diamonds.opens": "2026-11-20" });
+    expect((await getDiamondsTimeline(env)).opensAt).toBe("2026-11-20T05:01:00.000Z");
   });
 
   it("reads the bar from KV so it can move without a deploy", async () => {
@@ -315,38 +346,25 @@ describe("the timeline", () => {
     expect(policy.reviewMaxDays).toBe(5);
   });
 
-  /**
-   * The two dates get set one at a time, so the half-changed timeline is the
-   * normal state rather than an edge case.
-   */
-  it("names a timeline nobody could finish", () => {
-    expect(timelineProblems(TIMELINE, POLICY)).toEqual([]);
-    expect(
-      timelineProblems({ ...TIMELINE, closesAt: "2026-11-20T04:59:00.000Z" }, POLICY)[0],
-    ).toMatch(/takes 16/);
-    expect(
-      timelineProblems({ opensAt: TIMELINE.closesAt, closesAt: TIMELINE.opensAt }, POLICY),
-    ).toEqual(["Auditions close before they open."]);
-  });
 });
 
 describe("setting the timeline before the flag goes on", () => {
-  it("writes a date and reads the whole thing back", async () => {
+  it("writes the date and reads the whole thing back", async () => {
     const { env } = envWith();
-    expect((await setDiamondsTimeline(env, { closesAt: "2027-01-24" })).ok).toBe(true);
+    expect((await setDiamondsTimeline(env, { opensAt: "2026-11-20" })).ok).toBe(true);
     const readout = await inspectDiamondsConfig(env);
-    expect(readout.timeline.closesAt).toBe("2027-01-25T04:59:00.000Z");
-    expect(readout.dateSources.closesAt).toBe("set");
+    expect(readout.timeline.opensAt).toBe("2026-11-20T05:01:00.000Z");
+    expect(readout.dateSources.opensAt).toBe("set");
     // And says which values are still whatever the code shipped with, because
     // that is the thing to check against the announcement before turning it on.
-    expect(readout.dateSources.opensAt).toBe("default");
+    expect(readout.policySources.diamonds_bar).toBe("default");
     expect(readout.enabled).toBe(false);
   });
 
   it("refuses anything that isn't a date", async () => {
     const { env } = envWith();
-    expect((await setDiamondsTimeline(env, { closesAt: "Jan 10th" })).ok).toBe(false);
-    expect((await setDiamondsTimeline(env, { closesAt: "2027-13-45" })).ok).toBe(false);
+    expect((await setDiamondsTimeline(env, { opensAt: "Nov 15th" })).ok).toBe(false);
+    expect((await setDiamondsTimeline(env, { opensAt: "2026-13-45" })).ok).toBe(false);
     expect((await setDiamondsTimeline(env, {})).ok).toBe(false);
   });
 
@@ -390,18 +408,18 @@ describe("registering", () => {
     expect(roundOf((await getRecord(env, "100"))!, 1).windowOpenedAt).toBe("x");
   });
 
-  it("shuts once auditions have closed, and sends them to a director", async () => {
+  /**
+   * Registration used to shut on the shared close date. Nothing closes now —
+   * membership is enforced per person, so a newcomer in February is just a
+   * newcomer, and the only thing that can still turn anyone away is the retry
+   * wait after an audition that didn't pass.
+   */
+  it("takes a newcomer long after the old close date", async () => {
     const { env } = envWith();
-    const shut = new Date("2027-02-01T00:00:00Z");
-    const result = await register(env, "100", "Ada", "new", undefined, TIMELINE, POLICY, shut);
-    expect(result.ok).toBe(false);
-    expect(result.ok === false && result.reason).toMatch(/Ask a director/);
-  });
-
-  it("still answers someone already on the list after the close", async () => {
-    const { env } = envWith(Object.fromEntries([seed(dancer())]));
-    const shut = new Date("2027-02-01T00:00:00Z");
-    expect((await register(env, "100", "Ada", "new", undefined, TIMELINE, POLICY, shut)).ok).toBe(true);
+    const later = new Date("2027-02-01T00:00:00Z");
+    expect((await register(env, "100", "Ada", "new", undefined, TIMELINE, POLICY, later)).ok).toBe(
+      true,
+    );
   });
 
   it("holds someone who withdrew to the wait, same as a failure", async () => {
@@ -878,13 +896,39 @@ describe("membership", () => {
     expect((await getRecord(env, "100"))?.renewalNoticedAt).toBeUndefined();
   });
 
-  it("gives a director no date to be chased about", async () => {
-    const { env } = envWith(Object.fromEntries([seed(finalist({ discordId: "d1" }))]));
+  it("gives a Diamond Director no date to be chased about", async () => {
+    const { env } = envWith({
+      "config:role.diamonds_director": "role-judge",
+      ...Object.fromEntries([seed(finalist({ discordId: "d1" }))]),
+    });
+    memberRoles.mockResolvedValue(["role-judge"]);
     await sendResult(env, "d1", DIRECTORS, CTX, POLICY, new Date("2026-11-24T12:00:00Z"));
 
     const stored = (await getRecord(env, "d1"))!;
     expect(roundOf(stored, 2).outcome).toBe("passed");
     expect(stored.enforcedAt).toBeUndefined();
+  });
+
+  /**
+   * The role is the only effect of passing that happens outside the bot, and it
+   * had been missing: the record said Diamond and Discord didn't.
+   */
+  it("adds the Diamonds role when someone passes", async () => {
+    const { env } = envWith({
+      "config:role.diamonds": "role-diamonds",
+      ...Object.fromEntries([seed(finalist())]),
+    });
+    await sendResult(env, "100", DIRECTORS, CTX, POLICY, new Date("2026-11-24T12:00:00Z"));
+    expect(addRole).toHaveBeenCalledWith(env, "g-dance", "100", "role-diamonds");
+  });
+
+  /** And a result that's been decided still reaches them if the role doesn't. */
+  it("sends the result even when the role can't be added", async () => {
+    const { env } = envWith(Object.fromEntries([seed(finalist())]));
+    const sent = await sendResult(env, "100", DIRECTORS, CTX, POLICY, new Date("2026-11-24T12:00:00Z"));
+    expect(sent.ok).toBe(true);
+    expect(addRole).not.toHaveBeenCalled();
+    expect((await getRecord(env, "100"))!.enforcedAt).toBeTruthy();
   });
 
   it("gives nothing to someone who didn't pass", async () => {
@@ -1077,10 +1121,8 @@ describe("the renewal notices", () => {
     const { env } = envWith(
       Object.fromEntries([
         seed(member({
-          rounds: {
-            0: { submittedAt: "2028-12-01T00:00:00.000Z", submissionUrl: "https://again" },
-            2: { resultSentAt: "2027-11-15T00:00:00.000Z", outcome: "passed" },
-          },
+          registeredAt: "2028-11-20T00:00:00.000Z",
+          rounds: { 0: { submittedAt: "2028-12-01T00:00:00.000Z", submissionUrl: "https://again" } },
         })),
       ]),
     );
@@ -1093,17 +1135,37 @@ describe("the renewal notices", () => {
    * they're the ones judging it. Chasing them for a verdict they would have to
    * give themselves is the bot chasing its own judges.
    */
-  it("doesn't chase a director about their own renewal", async () => {
-    const { env } = envWith(Object.fromEntries([seed(member({ discordId: "d1" }))]));
-    const run = await runDiamondsSweep(
-      env,
-      TIMELINE,
-      POLICY,
-      new Date("2028-12-20T12:00:00Z"),
-      DIRECTORS,
-    );
+  it("doesn't chase a Diamond Director about their own renewal", async () => {
+    const { env } = envWith({
+      "config:role.diamonds_director": "role-judge",
+      ...Object.fromEntries([seed(member({ discordId: "d1" }))]),
+    });
+    memberRoles.mockResolvedValue(["role-judge"]);
+    const run = await runDiamondsSweep(env, TIMELINE, POLICY, new Date("2028-12-20T12:00:00Z"));
     expect(run.renewals).toBe(0);
     expect(sendDirectMessage).not.toHaveBeenCalled();
+  });
+
+  /**
+   * And it is the *role* that exempts, not being a director. The director list
+   * runs rank 7's cycles and rank 12's auditions too, so someone on it who
+   * doesn't judge Diamonds owes their renewal like anyone else.
+   */
+  it("still chases a director who doesn't judge Diamonds", async () => {
+    const { env } = envWith({
+      "config:role.diamonds_director": "role-judge",
+      ...Object.fromEntries([seed(member({ discordId: "d1" }))]),
+    });
+    memberRoles.mockResolvedValue(["some-other-role"]);
+    const run = await runDiamondsSweep(env, TIMELINE, POLICY, new Date("2028-12-20T12:00:00Z"));
+    expect(run.renewals).toBe(1);
+  });
+
+  /** No role configured means nobody is exempt, which is the safe direction. */
+  it("chases everybody when the judge role isn't set", async () => {
+    const { env } = envWith(Object.fromEntries([seed(member({ discordId: "d1" }))]));
+    const run = await runDiamondsSweep(env, TIMELINE, POLICY, new Date("2028-12-20T12:00:00Z"));
+    expect(run.renewals).toBe(1);
   });
 
   /** Forgetting the list chases everybody rather than nobody. */
@@ -1243,12 +1305,14 @@ describe("membership running out", () => {
     expect((await getRecord(env, "100"))?.lapsedAt).toBeTruthy();
   });
 
-  it("never revokes a director", async () => {
+  it("never revokes a Diamond Director", async () => {
     const { env } = envWith({
       ...ROLE,
+      "config:role.diamonds_director": "role-judge",
       ...Object.fromEntries([seed(member({ discordId: "d1" }))]),
     });
-    const run = await runDiamondsSweep(env, TIMELINE, POLICY, AFTER, DIRECTORS);
+    memberRoles.mockResolvedValue(["role-judge"]);
+    const run = await runDiamondsSweep(env, TIMELINE, POLICY, AFTER);
     expect(run.lapsed).toBe(0);
     expect(removeRole).not.toHaveBeenCalled();
   });
@@ -1299,7 +1363,7 @@ describe("registering inside the wait", () => {
     dancer({
       rounds: {
         0: zeroPassed(),
-        1: { submittedAt: "a", resultSentAt: "2026-11-20T00:00:00.000Z", outcome: "practice" },
+        1: { submittedAt: "a", resultSentAt: "2026-11-20T00:00:00.000Z", outcome: "failed" },
       },
       ...sealed,
       document: feedbackSent(),
@@ -1336,7 +1400,7 @@ describe("registering inside the wait", () => {
     );
     const stored = (await getRecord(env, "100"))!;
     expect(stored.history).toBeUndefined();
-    expect(roundOf(stored, 1).outcome).toBe("practice");
+    expect(roundOf(stored, 1).outcome).toBe("failed");
   });
 
   /** The refusal routes a judgement to the two people entitled to make it. */
@@ -1515,7 +1579,7 @@ describe("a failed renewal, start to finish", () => {
         1: {
           submittedAt: "2028-10-15T00:00:00.000Z",
           resultSentAt: "2028-10-20T00:00:00.000Z",
-          outcome: "practice",
+          outcome: "failed",
         },
       },
       document: feedbackSent("2028-09-10T00:00:00.000Z"),
@@ -1590,7 +1654,7 @@ describe("a failed renewal, start to finish", () => {
         1: {
           submittedAt: "2028-02-10T00:00:00.000Z",
           resultSentAt: "2028-02-15T00:00:00.000Z",
-          outcome: "practice",
+          outcome: "failed",
         },
       },
     });
@@ -1639,22 +1703,36 @@ describe("Round 0 is not a window", () => {
   });
 
   /**
-   * No fixed Round 0 deadline any more — the panel names the derived point past
-   * which three rounds no longer fit, and says going sooner is easier.
+   * Round 0 has no window of its own, so the only clock on it is the two months
+   * for the whole run — their own date, counted from their own registration,
+   * which is the only kind of deadline left.
    */
-  it("says there's no deadline, and names the date that does matter", () => {
-    const panel = roundPanel(dancer(), 0, CTX, OPEN);
-    expect(panel.content).toMatch(/no fixed deadline/i);
-    // The derived cliff, rendered as a Discord timestamp: end of DEC 22 local,
-    // the close date minus the 19 days three rounds still need.
-    const cliff = Math.floor(new Date(lastRound0At(TIMELINE, POLICY)).getTime() / 1000);
-    expect(panel.content).toContain(`<t:${cliff}:D>`);
+  it("names their own deadline, not a shared one", () => {
+    const panel = roundPanel(
+      dancer({ registeredAt: "2026-11-16T00:00:00.000Z" }),
+      0,
+      CTX,
+      OPEN,
+    );
+    expect(panel.content).toMatch(/All three rounds by/);
+    // Registered NOV 16, panel read NOV 18: 58 of the 60 days left.
+    expect(panel.content).toMatch(/\*\*58\*\* left/);
   });
 
-  it("switches to a warning once the room has gone", () => {
-    const panel = roundPanel(dancer(), 0, CTX, new Date("2026-12-30T00:00:00Z"));
-    expect(panel.content).toMatch(/three rounds no longer fit/);
-    expect(panel.content).toMatch(/welcome to submit anyway/);
+  /** And says nothing about a clock to somebody who was never given one. */
+  it("says nothing to a record from before the deadline existed", () => {
+    expect(roundPanel(dancer(), 0, CTX, OPEN).content).not.toMatch(/All three rounds by/);
+  });
+
+  it("switches to the ran-out line once it has", () => {
+    const panel = roundPanel(
+      dancer({ registeredAt: "2026-11-16T00:00:00.000Z" }),
+      0,
+      CTX,
+      new Date("2027-03-30T00:00:00Z"),
+    );
+    expect(panel.content).toMatch(/ran out/);
+    expect(panel.content).toMatch(/Talk to a director/);
   });
 
   it("promises the review turnaround once they've submitted", () => {
@@ -1721,7 +1799,8 @@ describe("starting a window", () => {
     expect(roundOf((await getRecord(env, "100"))!, 2).windowOpenedAt).toBe(now.toISOString());
   });
 
-  it("refuses a start too late to shut before auditions close", async () => {
+  /** And there is no longer any such thing as too late to start. */
+  it("lets them start whenever, with nothing shared to run into", async () => {
     const { env } = envWith(Object.fromEntries([seed(assigned())]));
     const result = await startWindow(
       env,
@@ -1729,10 +1808,9 @@ describe("starting a window", () => {
       2,
       TIMELINE,
       POLICY,
-      new Date("2027-01-09T12:00:00Z"),
+      new Date("2027-06-09T12:00:00Z"),
     );
-    expect(result.ok).toBe(false);
-    expect(result.ok === false && result.reason).toMatch(/wouldn't shut before/);
+    expect(result.ok).toBe(true);
   });
 
   /** Round 1 only, and the panel reads as good news rather than a refusal. */
@@ -1740,7 +1818,7 @@ describe("starting a window", () => {
    * The whole ordering, end to end: a cover, feedback, a piece, a start. The
    * feedback is the gate, so the piece can't even be put up before it.
    */
-  it("runs cover -> score -> feedback -> piece -> start, in that order", async () => {
+  it("runs cover -> score -> feedback -> read -> piece -> start, in that order", async () => {
     const { env } = envWith();
     const joined = new Date("2026-11-16T10:00:00Z");
     await register(env, "100", "Ada", "new", undefined, TIMELINE, POLICY, joined);
@@ -1768,11 +1846,25 @@ describe("starting a window", () => {
     // without anyone having to remember to file it again.
     expect(second.ok && second.record.document?.deliveredAt).toBe(reviewed.toISOString());
 
+    // A piece can go up before they've opened it — that's a director's job and
+    // it shouldn't wait on a dancer's inbox. Starting the window can't.
     expect(
       (await assignPiece(env, "100", 1, "https://piece", TARGET, TIMELINE, POLICY, reviewed)).ok,
     ).toBe(true);
+    const tooSoon = await startWindow(
+      env,
+      "100",
+      1,
+      TIMELINE,
+      POLICY,
+      new Date("2026-11-18T11:00:00Z"),
+    );
+    expect(tooSoon.ok).toBe(false);
+    expect(!tooSoon.ok && tooSoon.reason).toMatch(/in your DMs/);
+
+    await markFeedbackRead(env, "100", POLICY, new Date("2026-11-18T12:00:00Z"));
     expect(
-      (await startWindow(env, "100", 1, TIMELINE, POLICY, new Date("2026-11-18T11:00:00Z"))).ok,
+      (await startWindow(env, "100", 1, TIMELINE, POLICY, new Date("2026-11-18T13:00:00Z"))).ok,
     ).toBe(true);
   });
 });
@@ -1856,7 +1948,7 @@ describe("one piece to everyone", () => {
           },
         }),
       ),
-      seed(dancer({ discordId: "4", rounds: { 1: { outcome: "practice" } } })),
+      seed(dancer({ discordId: "4", rounds: { 1: { outcome: "failed" } } })),
       seed(dancer({ discordId: "5", withdrawnAt: "x", rounds: { 1: { outcome: "advanced" } } })),
     ]);
 
@@ -1972,7 +2064,12 @@ describe("the daily sweep", () => {
     expect(await runDiamondsSweep(env, TIMELINE, POLICY, due)).toEqual(quiet);
   });
 
-  it("warns once near the cliff, and not twice in one morning", async () => {
+  /**
+   * The last-chance nudge went with the close date it counted back from. What's
+   * left is the heads-up, which counts from the assignment — a fact about them
+   * rather than about a calendar nobody shares any more.
+   */
+  it("says nothing about a cliff, because there isn't one", async () => {
     const { env } = envWith(
       Object.fromEntries([
         seed(
@@ -1985,33 +2082,46 @@ describe("the daily sweep", () => {
         ),
       ]),
     );
-    // Assigned two days before the last start date: the heads-up's lead has not
-    // been reached and the last chance has, so exactly one goes out.
-    const now = new Date("2027-01-06T00:00:00Z");
-    expect(await runDiamondsSweep(env, TIMELINE, POLICY, now)).toEqual({ ...quiet, nudged: 1 });
-    expect(sendDirectMessage).toHaveBeenCalledTimes(1);
-    expect(sendDirectMessage.mock.calls[0]![2].content!).toMatch(/last chance/i);
+    // Two days in: too early even for the heads-up, and there is nothing else.
+    expect(
+      await runDiamondsSweep(env, TIMELINE, POLICY, new Date("2027-01-07T00:00:00Z")),
+    ).toEqual(quiet);
+
+    // Ten days in, and the only thing that fires is the heads-up.
+    expect(
+      await runDiamondsSweep(env, TIMELINE, POLICY, new Date("2027-01-15T00:00:00Z")),
+    ).toEqual({ ...quiet, headsUp: 1 });
+    expect(sendDirectMessage.mock.calls[0]![2].content!).toMatch(/waiting 10 days/);
+    expect(sendDirectMessage.mock.calls[0]![2].content!).not.toMatch(/last chance|close/i);
   });
 
   /**
    * The one nobody else can reach: registered, never submitted, no window to
    * key off and no piece to wait on.
    */
+  /**
+   * Counted from their registration now rather than back from a cliff, which is
+   * the only honest version of this message once nothing closes: "you put your
+   * name down ten days ago and we've not seen anything".
+   */
   it("nudges a registration that never became a Round 0", async () => {
-    const { env } = envWith(Object.fromEntries([seed(dancer())]));
+    const { env } = envWith(Object.fromEntries([seed(dancer({ registeredAt: "2026-11-20T00:00:00.000Z" }))]));
     expect(
-      await runDiamondsSweep(env, TIMELINE, POLICY, new Date("2026-12-10T00:00:00Z")),
+      await runDiamondsSweep(env, TIMELINE, POLICY, new Date("2026-11-29T00:00:00Z")),
     ).toEqual(quiet);
 
-    // Three days before the derived cliff, which is DEC 25 local.
-    const due = new Date("2026-12-24T00:00:00Z");
+    const due = new Date("2026-11-30T00:00:00Z");
     expect(await runDiamondsSweep(env, TIMELINE, POLICY, due)).toEqual({ ...quiet, round0: 1 });
     expect(sendDirectMessage.mock.calls[0]![2].content!).toMatch(/haven't sent your Round 0/);
     expect(await runDiamondsSweep(env, TIMELINE, POLICY, due)).toEqual(quiet);
   });
 
   it("leaves a returning Diamond out of the Round 0 nudge — they owe nothing", async () => {
-    const { env } = envWith(Object.fromEntries([seed(dancer({ cohort: "returning" }))]));
+    const { env } = envWith(
+      Object.fromEntries([
+        seed(dancer({ cohort: "returning", registeredAt: "2026-11-20T00:00:00.000Z" })),
+      ]),
+    );
     expect(
       await runDiamondsSweep(env, TIMELINE, POLICY, new Date("2026-12-24T00:00:00Z")),
     ).toEqual(quiet);
@@ -2342,10 +2452,11 @@ describe("the director's readout", () => {
 });
 
 describe("status", () => {
-  it("names no per-round dates, because there aren't any", () => {
+  it("names no dates at all, because there aren't any", () => {
     const panel = statusPanel(dancer(), 0, CTX, OPEN);
     expect(panel.content).toMatch(/Where everything stands/);
-    expect(panel.content).toMatch(/Everything shuts/);
+    // No date of any kind — a Discord timestamp is how every date here renders.
+    expect(panel.content).not.toMatch(/<t:\d+/);
     // The end-to-end estimate, so nobody has to add it up themselves.
     expect(panel.content).toMatch(/16 days/);
   });
@@ -2400,10 +2511,9 @@ describe("saying when you'll start", () => {
   it("refuses a day they couldn't start on", async () => {
     const { env } = envWith(Object.fromEntries([seed(assigned())]));
 
-    // Past the one shared cliff.
-    const late = await planStart(env, "100", 1, "2027-01-09", TIMELINE, POLICY, now);
-    expect(late.ok).toBe(false);
-    expect(late.ok === false && late.reason).toMatch(/wouldn't shut/);
+    // No upper bound any more: a date months out is a reasonable plan for
+    // someone renewing, and the only clock it could meet is their own date.
+    expect((await planStart(env, "100", 1, "2027-06-09", TIMELINE, POLICY, now)).ok).toBe(true);
 
     const gone = await planStart(env, "100", 1, "2026-11-20", TIMELINE, POLICY, now);
     expect(gone.ok).toBe(false);
@@ -2539,21 +2649,49 @@ describe("feedback, for either cohort", () => {
    * The verdict and the reasons as one message, in that order — the reasons
    * first, because they are the part that's worth something either way.
    */
-  it("carries a pass out with the feedback, and opens Round 1", async () => {
+  /**
+   * Two steps, and the split between them is the point: the verdict goes out
+   * immediately and the document waits for them to open it. Round 0 is finished
+   * either way — what the read gates is Round 1.
+   */
+  it("carries a pass out at once, and opens Round 1 when they read it", async () => {
     const { env } = envWith(
       Object.fromEntries([seed(dancer({ cohort: "returning", rounds: { 0: bothPass() } }))]),
     );
     await fileFeedback(env, "100", doc, "d1", TIMELINE, POLICY, OPEN);
-    const sent = sendDirectMessage.mock.calls[0]![2].content!;
-    expect(sent).toMatch(/through to Round 1/);
-    expect(sent).toContain("clean lines");
-    expect(sent).toMatch(/clock doesn't run until/);
-    expect(sent.indexOf("clean lines")).toBeLessThan(sent.indexOf("through to Round 1"));
 
-    const record = (await getRecord(env, "100"))!;
-    expect(roundOf(record, 0).outcome).toBe("passed");
-    expect(roundOf(record, 0).resultSentAt).toBe(OPEN.toISOString());
-    expect(activeRound(record, OPEN)).toEqual({ ok: true, round: 1 });
+    // The notice. Verdict yes, document no — nobody has to click to find out
+    // whether they're through.
+    const notice = sendDirectMessage.mock.calls[0]![2];
+    expect(notice.content!).toMatch(/you're through/i);
+    expect(notice.content!).not.toContain("clean lines");
+    expect(JSON.stringify(notice.components)).toContain("dia|read|me");
+
+    const delivered = (await getRecord(env, "100"))!;
+    expect(roundOf(delivered, 0).outcome).toBe("passed");
+    expect(roundOf(delivered, 0).resultSentAt).toBe(OPEN.toISOString());
+    // Still Round 0: the document is sitting there unopened.
+    expect(activeRound(delivered, OPEN)).toEqual({ ok: true, round: 0 });
+
+    const read = await markFeedbackRead(env, "100", POLICY, REVIEWED);
+    expect(read.ok && read.payload!.content!).toContain("clean lines");
+    expect(read.ok && read.payload!.content!).toMatch(/clock doesn't run until/);
+
+    const after = (await getRecord(env, "100"))!;
+    expect(after.document?.readAt).toBe(REVIEWED.toISOString());
+    expect(activeRound(after, REVIEWED)).toEqual({ ok: true, round: 1 });
+  });
+
+  /** Reading it twice shows it again and leaves the first read where it was. */
+  it("lets them re-read it without moving the date", async () => {
+    const { env } = envWith(
+      Object.fromEntries([seed(dancer({ cohort: "returning", rounds: { 0: bothPass() } }))]),
+    );
+    await fileFeedback(env, "100", doc, "d1", TIMELINE, POLICY, OPEN);
+    await markFeedbackRead(env, "100", POLICY, REVIEWED);
+    const again = await markFeedbackRead(env, "100", POLICY, LATER);
+    expect(again.ok && again.payload!.content!).toContain("clean lines");
+    expect((await getRecord(env, "100"))!.document?.readAt).toBe(REVIEWED.toISOString());
   });
 
   /** A fail says so, keeps the feedback, and ends the audition rather than opening Round 1. */
@@ -2578,11 +2716,16 @@ describe("feedback, for either cohort", () => {
     await fileFeedback(env, "100", doc, "d1", TIMELINE, POLICY, OPEN);
     const sent = sendDirectMessage.mock.calls[0]![2].content!;
     expect(sent).toMatch(/not taking this one through/);
-    expect(sent).toContain("clean lines");
+    // The reasons are behind the button; the decision isn't.
+    expect(sent).not.toContain("clean lines");
 
     const record = (await getRecord(env, "100"))!;
     expect(roundOf(record, 0).outcome).toBe("failed");
     expect(activeRound(record, OPEN).ok).toBe(false);
+
+    // And they can still read it, which is the part worth having.
+    const read = await markFeedbackRead(env, "100", POLICY, REVIEWED);
+    expect(read.ok && read.payload!.content!).toContain("clean lines");
   });
 
   /**
@@ -2935,5 +3078,568 @@ describe("feedback on a round that ends in a result", () => {
     const receipt = ballotReceipt(scored.record, 1, scored.tally, scored.splits, undefined, POLICY);
     expect(receipt.content).toMatch(/Feedback: 1 written/);
     expect(receipt.content).not.toContain("secret so far");
+  });
+});
+
+/**
+ * Practice, both ways in.
+ *
+ * Written as two sequences rather than a pile of unit tests because practice
+ * isn't one rule — it's the verdict, the outcome model, the retry wait, the
+ * membership and the result wording all agreeing to do nothing, and each of
+ * those was decided separately. These are the tests that fail if any one of
+ * them starts deciding something after all.
+ */
+describe("practice, asked for at the door", () => {
+  /** Comfortably past the bar, so "practice doesn't pass" is the only reason it doesn't. */
+  const eights = {
+    technicality: 8,
+    execution: 8,
+    performance: 8,
+    musicality: 8,
+  } as const;
+  const doc = {
+    content: "Good season.",
+    strengths: ["clean lines", "good pockets", "committed"],
+    growthAreas: ["arms"],
+  };
+
+  it("runs all three rounds with nothing decided in any of them", async () => {
+    const { env } = envWith();
+    const joined = new Date("2026-11-16T10:00:00Z");
+    await register(env, "100", "Ada", "new", undefined, TIMELINE, POLICY, joined, true);
+    expect((await getRecord(env, "100"))!.practiceFrom).toBe(0);
+
+    await submit(env, "100", 0, "https://cover", TIMELINE, POLICY, joined);
+
+    // Round 0 has no verdict to wait for, so the document *is* the round and
+    // goes the moment it's written. Nobody has called anything.
+    const filed = await fileFeedback(env, "100", doc, "d1", TIMELINE, POLICY, joined);
+    expect(filed.ok && filed.warning).toBeUndefined();
+    const zero = (await getRecord(env, "100"))!;
+    expect(roundOf(zero, 0).outcome).toBe("practice");
+    expect(roundOf(zero, 0).ballots).toBeUndefined();
+    // And it ends nothing: they're still going.
+    await markFeedbackRead(env, "100", POLICY, joined);
+    expect(activeRound((await getRecord(env, "100"))!, joined)).toEqual({ ok: true, round: 1 });
+
+    // Round 1 still gets scored, because the scores are what the feedback is
+    // built from — they just don't decide anything.
+    const reviewed = new Date("2026-11-20T10:00:00Z");
+    await assignPiece(env, "100", 1, "https://piece", TARGET, TIMELINE, POLICY, joined);
+    await startWindow(env, "100", 1, TIMELINE, POLICY, joined);
+    await submit(env, "100", 1, "https://mine", TIMELINE, POLICY, joined);
+    await scoreRound(env, "100", "d1", { targetScore: 4 }, POLICY, reviewed);
+    await scoreRound(env, "100", "d2", { targetScore: 4 }, POLICY, reviewed);
+
+    const sent = await sendResult(env, "100", DIRECTORS, CTX, POLICY, reviewed);
+    expect(sent.ok && sent.outcome).toBe("practice");
+    const said = sendDirectMessage.mock.calls.at(-1)![2].content!;
+    expect(said).toMatch(/practice/i);
+    expect(said).not.toMatch(/through to Round 2|not through/i);
+
+    // A target score of 4 against a before of 4 would have been a fail.
+    expect(activeRound((await getRecord(env, "100"))!, reviewed)).toEqual({ ok: true, round: 2 });
+  });
+
+  it("gives them no membership, no role and no wait at the end", async () => {
+    const { env } = envWith({
+      "config:role.diamonds": "role-diamonds",
+      ...Object.fromEntries([
+        seed(
+          dancer({
+            practiceFrom: 0,
+            document: feedbackSent(),
+            rounds: {
+              0: { submittedAt: "a", resultSentAt: "b", outcome: "practice" },
+              1: { submittedAt: "c", resultSentAt: "d", outcome: "practice" },
+              2: {
+                assignedPiece: "https://final",
+                submittedAt: "2026-11-22T00:00:00.000Z",
+                ballots: {
+                  d1: { scores: { ...eights }, at: "2026-11-23T00:00:00.000Z" },
+                  d2: { scores: { ...eights }, at: "2026-11-23T00:00:00.000Z" },
+                },
+              },
+            },
+            ...sealed,
+          }),
+        ),
+      ]),
+    });
+
+    const sent = await sendResult(env, "100", DIRECTORS, CTX, POLICY, new Date("2026-11-24T12:00:00Z"));
+    expect(sent.ok && sent.outcome).toBe("practice");
+
+    const stored = (await getRecord(env, "100"))!;
+    // Eights would have sailed past the bar. Practice doesn't pass.
+    expect(stored.memberSince).toBeUndefined();
+    expect(stored.enforcedAt).toBeUndefined();
+    expect(addRole).not.toHaveBeenCalled();
+
+    // And they can go again straight away — practice costs nothing, which is
+    // the deal. A wait here would make asking for it the riskier choice.
+    expect(
+      (await register(env, "100", "Ada", "new", undefined, TIMELINE, POLICY, new Date("2026-11-25T00:00:00Z"))).ok,
+    ).toBe(true);
+    const again = (await getRecord(env, "100"))!;
+    expect(again.history).toHaveLength(1);
+    expect(again.practiceFrom).toBeUndefined();
+  });
+});
+
+describe("carrying a failed Round 1 on as practice", () => {
+  /** A Round 1 both of them have scored, and it didn't move. */
+  const stuck = (over: Partial<DiamondsRecord> = {}): DiamondsRecord =>
+    dancer({
+      document: feedbackSent(),
+      rounds: {
+        0: zeroPassed(),
+        1: {
+          assignedPiece: "https://piece",
+          submittedAt: "2026-11-19T00:00:00.000Z",
+          ballots: {
+            d1: { targetScore: 4, at: "2026-11-20T00:00:00.000Z" },
+            d2: { targetScore: 4, at: "2026-11-20T00:00:00.000Z" },
+          },
+        },
+      },
+      ...sealed,
+      ...over,
+    });
+
+  const now = new Date("2026-11-21T10:00:00Z");
+
+  it("keeps the fail and keeps them going", async () => {
+    const { env } = envWith(Object.fromEntries([seed(stuck())]));
+    expect((await carryAsPractice(env, "100", POLICY)).ok).toBe(true);
+
+    const carried = (await getRecord(env, "100"))!;
+    expect(carried.practiceFrom).toBe(2);
+
+    const sent = await sendResult(env, "100", DIRECTORS, CTX, POLICY, now);
+    // The round still failed. Both facts are kept, because both are true.
+    expect(sent.ok && sent.outcome).toBe("failed");
+    const said = sendDirectMessage.mock.calls.at(-1)![2].content!;
+    expect(said).toMatch(/didn't move enough/);
+    expect(said).toMatch(/as practice/);
+
+    // And the audition doesn't end on it.
+    const after = (await getRecord(env, "100"))!;
+    expect(roundOf(after, 1).outcome).toBe("failed");
+    expect(activeRound(after, now)).toEqual({ ok: true, round: 2 });
+  });
+
+  it("offers the branch on the card, and only on a fail", () => {
+    const labels = (record: DiamondsRecord, round: Round) =>
+      JSON.stringify(reviewCard(record, round, tally(roundOf(record, round), 2), settleRound(record, round, POLICY), {
+        minScores: 2,
+        weights: DEFAULT_WEIGHTS,
+        bar: 7.5,
+        floor: 6,
+        commandChannel: "diamonds-bot",
+      }).components);
+
+    expect(labels(stuck(), 1)).toContain("Carry on as practice");
+    // Advanced: nothing to carry them out of.
+    const moved = stuck({
+      rounds: {
+        ...stuck().rounds,
+        1: {
+          ...stuck().rounds[1]!,
+          ballots: {
+            d1: { targetScore: 9, at: "2026-11-20T00:00:00.000Z" },
+            d2: { targetScore: 9, at: "2026-11-20T00:00:00.000Z" },
+          },
+        },
+      },
+    });
+    expect(labels(moved, 1)).not.toContain("Carry on as practice");
+    // Already practice: there is nowhere to carry them to.
+    expect(labels(stuck({ practiceFrom: 0 }), 1)).not.toContain("Carry on as practice");
+  });
+
+  it("refuses once they've already been told", async () => {
+    const told = stuck();
+    told.rounds[1]!.resultSentAt = "2026-11-20T12:00:00.000Z";
+    told.rounds[1]!.outcome = "failed";
+    const { env } = envWith(Object.fromEntries([seed(told)]));
+    const result = await carryAsPractice(env, "100", POLICY);
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.reason).toMatch(/already been told/);
+  });
+
+  it("still ends in no wait, because Round 2 was practice", async () => {
+    const { env } = envWith(
+      Object.fromEntries([
+        seed(
+          stuck({
+            practiceFrom: 2,
+            rounds: {
+              0: zeroPassed(),
+              1: { submittedAt: "a", resultSentAt: "b", outcome: "failed" },
+              2: { submittedAt: "c", resultSentAt: "d", outcome: "practice" },
+            },
+          }),
+        ),
+      ]),
+    );
+    expect(
+      (await register(env, "100", "Ada", "new", undefined, TIMELINE, POLICY, new Date("2026-12-01T00:00:00Z"))).ok,
+    ).toBe(true);
+  });
+});
+
+/**
+ * The two-month clock.
+ *
+ * The only deadline left, and the one kind that fits a rolling process: it
+ * belongs to one person, counted from their own registration, so it can't make
+ * anybody wait for anybody else. Tested as a sequence because the warning, the
+ * close, the two refusals and the wait are five rules that have to agree about
+ * one date.
+ */
+describe("the two-month clock", () => {
+  const JOINED = "2026-11-16T00:00:00.000Z";
+  /**
+   * Mid-run and waiting on a piece, so the only thing the sweep can have to say
+   * is about the clock — the heads-up needs an assigned piece, and it would
+   * otherwise win under the one-message-a-day rule and hide what's being tested.
+   */
+  const running = (over: Partial<DiamondsRecord> = {}): DiamondsRecord =>
+    dancer({
+      registeredAt: JOINED,
+      document: feedbackSent(),
+      rounds: { 0: zeroPassed() },
+      ...sealed,
+      ...over,
+    });
+
+  it("warns once when there are ten days left", () => {
+    expect(runEndsAt(running(), 60)).toBe("2027-01-15T00:00:00.000Z");
+    expect(runDaysLeft(running(), 60, new Date("2027-01-04T00:00:00Z"))).toBe(11);
+  });
+
+  it("sends that warning, and only once", async () => {
+    const { env } = envWith(Object.fromEntries([seed(running())]));
+    const tenOut = new Date("2027-01-05T12:00:00Z");
+    expect(await runDiamondsSweep(env, TIMELINE, POLICY, tenOut)).toEqual({
+      ...quiet,
+      warned: 1,
+    });
+    const said = sendDirectMessage.mock.calls[0]![2].content!;
+    expect(said).toMatch(/days left on your audition/);
+    expect(said).toMatch(/ask a director/i);
+    expect(await runDiamondsSweep(env, TIMELINE, POLICY, tenOut)).toEqual(quiet);
+  });
+
+  it("closes the audition when the clock runs out, and tells everyone", async () => {
+    const { env } = envWith(Object.fromEntries([seed(running())]));
+    const after = new Date("2027-01-16T12:00:00Z");
+    expect(await runDiamondsSweep(env, TIMELINE, POLICY, after)).toEqual({
+      ...quiet,
+      expired: 1,
+    });
+
+    const stored = (await getRecord(env, "100"))!;
+    expect(stored.expiredAt).toBe(after.toISOString());
+    expect(sendDirectMessage.mock.calls[0]![2].content!).toMatch(/audition has closed/);
+    expect(alertDirectors.mock.calls[0]![1]).toMatch(/audition has closed/);
+    // Points the directors at the way back, because there is one.
+    expect(alertDirectors.mock.calls[0]![1]).toMatch(/diamonds add/);
+
+    // Once. The record carries the fact, so tomorrow's sweep says nothing.
+    expect(await runDiamondsSweep(env, TIMELINE, POLICY, after)).toEqual(quiet);
+  });
+
+  it("refuses a start and a submission once it has run out", async () => {
+    const { env } = envWith(Object.fromEntries([seed(running())]));
+    const after = new Date("2027-01-16T12:00:00Z");
+
+    const started = await startWindow(env, "100", 1, TIMELINE, POLICY, after);
+    expect(started.ok).toBe(false);
+    expect(started.ok === false && started.reason).toMatch(/ran out/);
+    expect(started.ok === false && started.reason).toMatch(/Talk to a director/);
+
+    const sent = await submit(env, "100", 0, "https://cover", TIMELINE, POLICY, after);
+    expect(sent.ok).toBe(false);
+  });
+
+  /** Running out costs what dropping out costs, for the same reason. */
+  it("charges the six-month wait from the day it closed", async () => {
+    const { env } = envWith(
+      Object.fromEntries([seed(running({ expiredAt: "2027-01-16T12:00:00.000Z" }))]),
+    );
+    const soon = await register(env, "100", "Ada", "new", undefined, TIMELINE, POLICY, new Date("2027-03-01T00:00:00Z"));
+    expect(soon.ok).toBe(false);
+    expect(soon.ok === false && soon.reason).toMatch(/6-month wait/);
+
+    expect(
+      (await register(env, "100", "Ada", "new", undefined, TIMELINE, POLICY, new Date("2027-07-20T00:00:00Z"))).ok,
+    ).toBe(true);
+  });
+
+  /** But not for a run nobody was judging. */
+  it("charges nothing when the run was practice", async () => {
+    const { env } = envWith(
+      Object.fromEntries([
+        seed(running({ practiceFrom: 0, expiredAt: "2027-01-16T12:00:00.000Z" })),
+      ]),
+    );
+    expect(
+      (await register(env, "100", "Ada", "new", undefined, TIMELINE, POLICY, new Date("2027-02-01T00:00:00Z"))).ok,
+    ).toBe(true);
+  });
+
+  it("leaves a finished audition alone, however long ago it finished", async () => {
+    const { env } = envWith(
+      Object.fromEntries([
+        seed(
+          running({
+            rounds: {
+              0: zeroPassed(),
+              1: { submittedAt: "a", resultSentAt: "b", outcome: "advanced" },
+              2: { submittedAt: "c", resultSentAt: "d", outcome: "passed" },
+            },
+          }),
+        ),
+      ]),
+    );
+    expect(await runDiamondsSweep(env, TIMELINE, POLICY, new Date("2027-06-16T12:00:00Z"))).toEqual(
+      quiet,
+    );
+    expect((await getRecord(env, "100"))!.expiredAt).toBeUndefined();
+  });
+
+  /**
+   * And invents nothing for a record written before this existed. A deadline
+   * somebody was never told about is worse than no deadline.
+   */
+  it("gives no clock to a record with no registration date", async () => {
+    const { env } = envWith(Object.fromEntries([seed(running({ registeredAt: undefined }))]));
+    expect(runEndsAt(running({ registeredAt: undefined }), 60)).toBeUndefined();
+    expect(await runDiamondsSweep(env, TIMELINE, POLICY, new Date("2027-06-16T12:00:00Z"))).toEqual(
+      quiet,
+    );
+  });
+
+  /**
+   * A director's extra days move the date rather than making a second clock,
+   * and they're kept one grant at a time so the total has an audit trail
+   * behind it.
+   */
+  it("counts a director's added days", () => {
+    const granted = (...days: number[]) =>
+      running({
+        runExtensions: days.map((one) => ({
+          days: one,
+          reason: "injury",
+          by: "d1",
+          at: "2027-01-10T00:00:00.000Z",
+        })),
+      });
+    expect(runEndsAt(granted(14), 60)).toBe("2027-01-29T00:00:00.000Z");
+    expect(runExpired(granted(14), 60, new Date("2027-01-20T00:00:00Z"))).toBe(false);
+    // Two grants add up.
+    expect(runEndsAt(granted(14, 7), 60)).toBe("2027-02-05T00:00:00.000Z");
+  });
+
+  describe("extending the run", () => {
+    it("moves the date and tells them", async () => {
+      const { env } = envWith(Object.fromEntries([seed(running())]));
+      const result = await extendRun(env, "100", 14, "injury", "d1", POLICY, new Date("2027-01-10T00:00:00Z"));
+      expect(result.ok).toBe(true);
+      expect(runEndsAt((await getRecord(env, "100"))!, 60)).toBe("2027-01-29T00:00:00.000Z");
+      expect(sendDirectMessage.mock.calls[0]![2].content!).toMatch(/14 more days/);
+    });
+
+    /**
+     * The reason it exists. The refusal a dancer sees when the clock runs out
+     * says "talk to a director", so a director has to be able to act on that —
+     * and they pick up mid-round rather than starting over.
+     */
+    it("reopens an audition that already closed", async () => {
+      const { env } = envWith(
+        Object.fromEntries([seed(running({ expiredAt: "2027-01-16T12:00:00.000Z" }))]),
+      );
+      const result = await extendRun(env, "100", 21, "was in hospital", "d1", POLICY, new Date("2027-01-18T00:00:00Z"));
+      expect(result.ok).toBe(true);
+
+      const stored = (await getRecord(env, "100"))!;
+      expect(stored.expiredAt).toBeUndefined();
+      expect(runExpired(stored, 60, new Date("2027-01-19T00:00:00Z"))).toBe(false);
+      expect(sendDirectMessage.mock.calls[0]![2].content!).toMatch(/open again/);
+      // And the wait it was charging is gone with it.
+      expect(
+        (await register(env, "100", "Ada", "new", undefined, TIMELINE, POLICY, new Date("2027-01-19T00:00:00Z"))).ok,
+      ).toBe(true);
+    });
+
+    /** The warning can fire again, so an extension doesn't cost them one. */
+    it("lets the ten-day warning come round again", async () => {
+      const { env } = envWith(
+        Object.fromEntries([seed(running({ runWarnedAt: "2027-01-05T12:00:00.000Z" }))]),
+      );
+      await extendRun(env, "100", 14, "injury", "d1", POLICY, new Date("2027-01-10T00:00:00Z"));
+      expect((await getRecord(env, "100"))!.runWarnedAt).toBeUndefined();
+
+      sendDirectMessage.mockClear();
+      const run = await runDiamondsSweep(env, TIMELINE, POLICY, new Date("2027-01-20T12:00:00Z"));
+      expect(run.warned).toBe(1);
+    });
+
+    it("refuses days that still leave them past the date", async () => {
+      const { env } = envWith(
+        Object.fromEntries([seed(running({ expiredAt: "2027-01-16T12:00:00.000Z" }))]),
+      );
+      const result = await extendRun(env, "100", 1, "injury", "d1", POLICY, new Date("2027-02-01T00:00:00Z"));
+      expect(result.ok).toBe(false);
+      expect(result.ok === false && result.reason).toMatch(/enough to actually finish/);
+    });
+
+    it("refuses an audition that's already been decided", async () => {
+      const { env } = envWith(
+        Object.fromEntries([
+          seed(
+            running({
+              rounds: { 1: { submittedAt: "a", resultSentAt: "b", outcome: "failed" } },
+            }),
+          ),
+        ]),
+      );
+      const result = await extendRun(env, "100", 14, "x", "d1", POLICY, new Date("2027-01-10T00:00:00Z"));
+      expect(result.ok).toBe(false);
+      expect(result.ok === false && result.reason).toMatch(/diamonds add/);
+    });
+  });
+});
+
+/**
+ * An enforcement date landing in the middle of a re-audition.
+ *
+ * The date asks for a re-audition; somebody mid-re-audition is answering it.
+ * Taking the role off them on Jan 1 would be the bot failing to notice its own
+ * question being answered — so nothing is reassessed until that audition ends,
+ * and then it is reassessed on the spot.
+ */
+describe("a date that lands mid-audition", () => {
+  const renewing = (over: Partial<DiamondsRecord> = {}): DiamondsRecord =>
+    dancer({
+      memberSince: "2027-11-15T00:00:00.000Z",
+      enforcedAt: "2029-01-01T05:00:00.000Z",
+      // Registered again in December, with the date eleven days out.
+      registeredAt: "2028-12-20T00:00:00.000Z",
+      history: [{ rounds: {}, outcome: "passed", finishedAt: "2027-11-15T00:00:00.000Z" }],
+      rounds: { 0: { submittedAt: "2028-12-22T00:00:00.000Z" } },
+      ...over,
+    });
+
+  const ROLE = { "config:role.diamonds": "role-diamonds" };
+
+  it("takes nothing off them on the day itself", async () => {
+    const { env } = envWith({ ...ROLE, ...Object.fromEntries([seed(renewing())]) });
+    const theDay = new Date("2029-01-01T12:00:00Z");
+    expect(await runDiamondsSweep(env, TIMELINE, POLICY, theDay)).toEqual(quiet);
+    expect(removeRole).not.toHaveBeenCalled();
+    expect((await getRecord(env, "100"))!.lapsedAt).toBeUndefined();
+  });
+
+  /** Nor a fortnight later, while they're still going. */
+  it("leaves them alone for as long as the audition is live", async () => {
+    const { env } = envWith({ ...ROLE, ...Object.fromEntries([seed(renewing())]) });
+    expect(await runDiamondsSweep(env, TIMELINE, POLICY, new Date("2029-01-15T12:00:00Z"))).toEqual(
+      quiet,
+    );
+    expect(removeRole).not.toHaveBeenCalled();
+  });
+
+  /** And says nothing about renewing, either — they're doing it. */
+  it("sends no renewal notice while it's live", async () => {
+    const { env } = envWith({ ...ROLE, ...Object.fromEntries([seed(renewing())]) });
+    expect(await runDiamondsSweep(env, TIMELINE, POLICY, new Date("2028-12-28T12:00:00Z"))).toEqual(
+      quiet,
+    );
+    expect(sendDirectMessage).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The deferral ends with the audition, not with a grace period — so a
+   * withdrawal puts them straight back in front of a date that has already
+   * gone. That's the rule that stops "drop it and keep the role" working.
+   */
+  it("revokes as soon as they drop it", async () => {
+    const { env } = envWith({
+      ...ROLE,
+      ...Object.fromEntries([seed(renewing({ withdrawnAt: "2029-01-10T00:00:00.000Z" }))]),
+    });
+    const run = await runDiamondsSweep(env, TIMELINE, POLICY, new Date("2029-01-11T12:00:00Z"));
+    expect(run.lapsed).toBe(1);
+    expect(removeRole).toHaveBeenCalledWith(env, "g-dance", "100", "role-diamonds");
+    // The DM names the date it ran to rather than claiming it was today.
+    expect(sendDirectMessage.mock.calls[0]![2].content!).toMatch(/ran to <t:\d+:D>/);
+  });
+
+  /** Same the moment the two-month clock closes it. */
+  it("revokes when the run closes instead", async () => {
+    const { env } = envWith({
+      ...ROLE,
+      ...Object.fromEntries([seed(renewing({ expiredAt: "2029-02-18T00:00:00.000Z" }))]),
+    });
+    const run = await runDiamondsSweep(env, TIMELINE, POLICY, new Date("2029-02-19T12:00:00Z"));
+    expect(run.lapsed).toBe(1);
+  });
+
+  /** A pass moves the date instead, so there's nothing left to revoke. */
+  it("moves the date on a pass, with no gap in between", async () => {
+    const { env } = envWith({
+      ...ROLE,
+      ...Object.fromEntries([
+        seed(
+          renewing({
+            ...sealed,
+            document: feedbackSent("2028-12-23T00:00:00.000Z"),
+            rounds: {
+              0: { submittedAt: "a", resultSentAt: "b", outcome: "passed" },
+              1: { submittedAt: "c", resultSentAt: "d", outcome: "advanced" },
+              2: {
+                submittedAt: "2029-01-05T00:00:00.000Z",
+                ballots: {
+                  d1: { scores: { technicality: 8, execution: 8, performance: 8, musicality: 8 }, at: "e" },
+                  d2: { scores: { technicality: 8, execution: 8, performance: 8, musicality: 8 }, at: "e" },
+                },
+              },
+            },
+          }),
+        ),
+      ]),
+    });
+
+    // Their date has already gone by, and they still have the role.
+    const sent = await sendResult(env, "100", DIRECTORS, CTX, POLICY, new Date("2029-01-06T12:00:00Z"));
+    expect(sent.ok && sent.outcome).toBe("passed");
+
+    const stored = (await getRecord(env, "100"))!;
+    // Passing in January puts them on the next Jan 1, by the usual table.
+    expect(stored.enforcedAt).toBe("2030-01-01T05:00:00.000Z");
+    expect(await runDiamondsSweep(env, TIMELINE, POLICY, new Date("2029-01-07T12:00:00Z"))).toEqual(
+      quiet,
+    );
+    expect(removeRole).not.toHaveBeenCalled();
+  });
+
+  /** A fail hands them back to a date that has gone, which takes effect at once. */
+  it("revokes right after a failed verdict", async () => {
+    const { env } = envWith({
+      ...ROLE,
+      ...Object.fromEntries([
+        seed(
+          renewing({
+            rounds: { 1: { submittedAt: "a", resultSentAt: "2029-01-06T00:00:00.000Z", outcome: "failed" } },
+          }),
+        ),
+      ]),
+    });
+    const run = await runDiamondsSweep(env, TIMELINE, POLICY, new Date("2029-01-07T12:00:00Z"));
+    expect(run.lapsed).toBe(1);
   });
 });
