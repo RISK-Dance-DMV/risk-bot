@@ -370,7 +370,7 @@ export const DIAMONDS_COMMAND = {
     {
       type: ApplicationCommandOptionType.SUB_COMMAND,
       name: "plan",
-      description: "Say roughly when you'll start the round you're in, and get reminded",
+      description: "Say roughly when you'll start the round you're in — the directors see it",
       options: [
         {
           type: ApplicationCommandOptionType.STRING,
@@ -494,42 +494,6 @@ export const DIAMONDS_COMMAND = {
           name: "piece",
           description: "A link to the piece, or the song",
           required: true,
-        },
-        ROUND_OPTION,
-      ],
-    },
-    {
-      type: ApplicationCommandOptionType.SUB_COMMAND,
-      name: "extend",
-      description: "Directors: add days to someone's window, or to their whole run",
-      options: [
-        {
-          type: ApplicationCommandOptionType.USER,
-          name: "dancer",
-          description: "Who it's for",
-          required: true,
-        },
-        {
-          type: ApplicationCommandOptionType.INTEGER,
-          name: "days",
-          description: "How many days — size it to what went wrong, not a second window",
-          required: true,
-        },
-        {
-          type: ApplicationCommandOptionType.STRING,
-          name: "reason",
-          description: "What happened (recorded, not sent)",
-          required: true,
-        },
-        {
-          type: ApplicationCommandOptionType.STRING,
-          name: "scope",
-          description: "This round's window, or their whole audition. Defaults to the window",
-          required: false,
-          choices: [
-            { name: "This round's window", value: "window" },
-            { name: "Their whole audition — reopens it if it closed", value: "run" },
-          ],
         },
         ROUND_OPTION,
       ],

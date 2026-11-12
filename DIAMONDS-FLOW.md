@@ -15,6 +15,7 @@ appears it is the shipped default, and all of them live in KV — see
 - [Round 0 — do you belong in the process](#round-0--do-you-belong-in-the-process)
 - [Round 1 — did you move the thing we named](#round-1--did-you-move-the-thing-we-named)
 - [Round 2 — are you a Diamond](#round-2--are-you-a-diamond)
+- [Asking for time](#asking-for-time)
 - [What a pass buys](#what-a-pass-buys)
 - [Renewing](#renewing)
 - [When it doesn't go cleanly](#when-it-doesnt-go-cleanly)
@@ -62,7 +63,7 @@ yours alone.
 | **Dancers** | Buttons on the panel in their DMs — start, submit, pick a day, withdraw. `/diamonds register` is the only thing anybody has to type; the rest still work as commands if you prefer. |
 | **Directors** | Put pieces up, score, write feedback, send results. Everything else is the bot's. |
 | **#diamonds-bot** (dance server) | Where `/diamonds` works. The handler refuses the command anywhere else. |
-| **#audition-review** (community server) | Where review cards are posted. One card per person per round. |
+| **#audition-review** (community server) | Where review cards are posted. One card per person per round, and **Round 0's goes up the moment they register** — registering is a submission now, so it posts a card like any other. For a returning Diamond too: their Round 0 is decided on the season you've already watched, so it's reviewable the instant they're on the list. |
 | **DMs** | Every result, every reminder, every piece. Nothing a dancer is told is public. |
 
 The review card's buttons work even though `#audition-review` is in a
@@ -200,9 +201,8 @@ is the only moment it can be an honest read.
 
 **You press start when you're ready.** The piece is revealed to you then,
 not before, and the clock starts: 3 days to learn it, record it, submit it.
-The clock doesn't stop. If something goes wrong, say so *before* the
-window closes — a director can add days with `/diamonds extend`, sized to
-what went wrong rather than as a second window.
+The clock doesn't stop. If something goes wrong, there's an **Ask for more
+time** button on the panel — see [Asking for time](#asking-for-time).
 
 **Both directors score that one named thing again**, 0–10. **The worse it
 started, the more it has to move** — the ask is half the distance to the bar,
@@ -326,14 +326,58 @@ the stake, because the dancer's 60 days keep running while they wait.
   one everybody takes. Press Withdraw or just stop answering, it's six months
   either way.
 - **A practice run costs nothing**, however it ends.
-- **`/diamonds extend scope:run`** adds days to it, before or after the date —
-  the same command that extends a window, and an extension granted after it ran
-  out reopens the audition. `/diamonds add` is the other way back.
+- **Nobody extends the 60, including you.** The way back into a closed run is
+  `/diamonds add`, which puts them back mid-round with a fresh 60 days — days
+  they can use, rather than more of a date that has gone.
 - A pass on day 59 is a pass. The clock only touches auditions that haven't
   finished, and it invents nothing for anyone who registered before it existed.
 
 Why have it at all: a Round 1 read taken in November against a Round 2 danced
 in April isn't comparing the same dancer.
+
+## Asking for time
+
+**Ask for more time** sits beside Submit while your window is open. It asks two
+things: how many days (up to 21) and what's happened.
+
+**It only ever extends that round's window.** Nobody can ask for days on the 60
+— that number is generous enough that running out of it isn't a timing problem,
+and an ask against it would be asking to be slower at the whole thing rather
+than for help with the three days in front of you. With no window open you're
+refused and told why: the clock that matters starts when you press start, so
+there's nothing running down while you wait.
+
+**Granting is the only extension there is.** There's no director command for it
+— `/diamonds extend` is gone. An extension happens because somebody asked and a
+director pressed Grant, which means every extension on file has a reason
+attached to it and a name against the answer.
+
+**It doesn't ask which round, either.** That's a fact about your record.
+
+The question posts to **#audition-review** as its own message with two buttons,
+**Grant N days** and **Deny**, and nothing else on it. That's the trainee rule:
+an extension request is the only thing on a directors' screen with somebody
+waiting on an answer, so leaving anything else pressable next to it invites
+answering a question nobody asked.
+
+- **Its own message**, not a row on the review card. The card for the round
+  they're *in* doesn't exist yet — cards go up on a submission, and somebody
+  asking for more time hasn't submitted that round. A question with its own
+  message also can't be buried under a card that's about something else.
+- **One at a time.** A second ask while the first is unanswered is refused.
+- **Your deadline keeps running while it sits there**, and the panel says so.
+  The ask doesn't pause anything, so keep working if you can.
+- **A denial needs a reason**, and you're told what was written — on your panel
+  as well as in a DM, so it doesn't vanish.
+- **Granting reuses the ordinary extension path**, so an extension asked for and
+  one given unprompted are the same write, down to clearing the reminder marker
+  so the new deadline gets its own warning.
+- **If it can't reach the channel, nothing is recorded.** A request the
+  directors can't see is worse than one that didn't go through, because you'd be
+  waiting on a question nobody has.
+
+Once answered, the question becomes the outcome in place — who granted it, when,
+and the note if there was one. That's the audit trail.
 
 ## What a pass buys
 
@@ -466,24 +510,32 @@ the same morning.
 
 In order:
 
-1. **Window closing** (Rounds 1 and 2) — "closes in X", with a pointer at
-   `extend` if something's gone wrong.
-2. **Your planned start date** has arrived.
-3. **Heads-up** — your piece has been sitting there 10 days.
-4. **On the list 10 days with no cover in.** Only reachable through
+1. **Window closing** (Rounds 1 and 2) — "closes in X", and that you can ask
+   for more time.
+2. **Heads-up** — your piece has been sitting there 10 days.
+3. **On the list 10 days with no cover in.** Only reachable through
    `/diamonds add` now, since registering is sending the cover — and someone a
    director added is the least likely to know what they owe, so the message
    says why they never registered themselves.
-5. **Membership lapsed.** Not a message, a fact, so it sits outside the
-   one-a-day rule: someone whose membership ran out this morning should not
-   be told about their open window instead.
-6. **Renewal notice** — last, and only if nothing else spoke, because
-   anyone being reminded to submit is plainly already mid-audition.
+4. **Ten days left of your 60**, with the arithmetic in it.
+5. **The 60 ran out.** Not a reminder but an ending, so it sits outside the
+   one-a-day rule.
+6. **Membership lapsed.** Also an ending, also outside the rule: someone whose
+   membership ran out this morning should not be told about their open window
+   instead.
+7. **Renewal notice** — last, and only if nothing else spoke, because anyone
+   being reminded to submit is plainly already mid-audition.
 
-Withdrawing silences 1–4 and leaves 5 and 6 running.
+Withdrawing silences 1–5 and leaves 6 and 7 running.
 
-The sweep returns counts for all of it, including `blocked` — memberships
-that ran out and could not be revoked.
+**There's no "you said you'd start today" message.** There was, and it went:
+`/diamonds plan` still records the date and the roster still shows it to the
+directors, which is what it was always most useful for. A date somebody
+volunteered isn't a commitment, and chasing them about one turns a helpful guess
+into a thing they'd rather not have offered.
+
+Separately, once a morning, the directors get a list of ballots they owe past
+the promised turnaround — the only message here that repeats.
 
 ## Command reference
 
@@ -494,15 +546,16 @@ that ran out and could not be revoked.
 | `/diamonds register cover: [practice:]` | Your name down **and** your Round 0 cover. Also how you start again. |
 | `/diamonds start` | Get your piece; the clock starts. |
 | `/diamonds submit link:` | Submit for whichever round you're in. |
-| `/diamonds plan date:` | Say roughly when you'll start, and get reminded. |
+| `/diamonds plan date:` | Say roughly when you'll start. The directors see it on the roster; nothing reminds you. |
 | `/diamonds status` | Where you stand, your date, and which audition this is if it isn't your first. |
 | `/diamonds withdraw` | Warns, then needs a button. Costs six months. |
+| *(button only)* **Ask for more time** | Days + what happened, answered by a director in #audition-review. |
 
 Neither `start` nor `submit` takes a round. **The round is derived from
 your record** — someone who has to know they're in Round 1 to submit is
 someone the process has already failed.
 
-**Directors** (eleven):
+**Directors** (ten commands, and the buttons):
 
 | | |
 | --- | --- |
@@ -514,7 +567,7 @@ someone the process has already failed.
 | `/diamonds score dancer: …` | Your sealed ballot on whichever round is waiting. |
 | `/diamonds feedback dancer:` | The Round 0 document. Any time; held until both verdicts. |
 | `/diamonds result dancer:` | Read a settled result back, then send it. |
-| `/diamonds extend dancer: days: reason: [scope:]` | Add days to an open window, or — with `scope:run` — to their whole 60 days, which reopens a closed audition. |
+| *(button only)* **Grant / Deny** | Answer a dancer's ask for days, in #audition-review. There's no extend command. |
 | `/diamonds add dancer: cohort:` | Late entry, or inside the wait. Checks neither. |
 | `/diamonds grant dancer: [until:]` | Record an existing Diamond, no audition. |
 
@@ -562,6 +615,5 @@ All settled bar one:
 the Round 2 submission, it covers four waits totalling 16 days, so 60 is
 generous by design rather than by accident.
 
-**Still to build:** the dancer-asks / director-answers extension, the way
-trainees do it — a request, then Grant or Deny on a button off the review card.
-Today a director can add days but nobody can ask.
+**Nothing left to build.** The last piece was the dancer-asks extension, and
+it's in — see [Asking for time](#asking-for-time).

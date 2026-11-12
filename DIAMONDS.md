@@ -597,7 +597,7 @@ the fix belongs to a director.
 ### The commands
 
 ```
-/diamonds register   put your name down, and estimate when you'll send Round 0
+/diamonds register   put your name down AND send your Round 0 cover — one step
 /diamonds plan       say when you'll start the round you're in, and get reminded
 /diamonds start      the panel, and the [Start time now] button
 /diamonds submit     hand in a link, for the round you're in
@@ -605,17 +605,23 @@ the fix belongs to a director.
 /diamonds withdraw   take yourself off the list
 
 /diamonds config     directors: what this will run on — read before the flag
-/diamonds schedule   directors: set the open and close dates, read it back
-/diamonds add        directors: put someone on after auditions have closed
+/diamonds schedule   directors: set the open date, read it back
+/diamonds add        directors: put someone on the list, or back on it
 /diamonds assign     directors: one person's piece — plus, for Round 1, what it
                      tests and the number that thing starts at
 /diamonds assign-all directors: one piece to everyone who hasn't started — Round 2's
-/diamonds extend     directors: add days to an open window
+/diamonds grant      directors: record an existing Diamond, no audition
 /diamonds score      directors: your sealed ballot on whichever round is waiting
 /diamonds result     directors: read a settled result back, then send it
 /diamonds feedback   directors: leave feedback — any time, before or after your ballot
 /diamonds roster     directors: who's waiting on you, and who you're waiting on
 ```
+
+**And the buttons, which cover most of it now.** A dancer submits, plans,
+withdraws and asks for more time from the panel in their DMs; a director scores,
+writes feedback, sends results and answers extension requests from the cards in
+#audition-review. `/diamonds extend` is gone — an extension happens because
+somebody asked and a director pressed Grant.
 
 Neither `start` nor `submit` takes a round. It's derived from the dancer's own
 record: someone who has to know they're in Round 1 in order to submit is someone
@@ -669,11 +675,13 @@ in one run:
 
 | When | What | Why |
 | --- | --- | --- |
-| 1 day before their own window shuts | the deadline, extension door open | their close time is personal — no two people share one |
-| 3 days before the last possible start | last chance | the only message keyed to the shared calendar, because this cliff really is shared |
+| 1 day before their own window shuts | the deadline, and the ask button | their close time is personal — no two people share one |
 | the morning they said they'd start | you picked today | the one date in the whole process that is theirs, so it outranks anything generic |
-| 10 days after their window became startable | your piece has been waiting | counted from *them*, not the calendar: the close date can be two months off, and a nudge pegged to it would let someone sit on a piece for seven weeks in silence |
-| 3 days before the last useful Round 0 | you registered but never sent a cover | nothing else can reach this person: no window to key off, no piece to wait on |
+| 10 days after their window became startable | your piece has been waiting | counted from *them*, not from a calendar — there is no shared calendar left to count from |
+| 10 days on the list with no cover in | we haven't got a cover from you | only reachable through `/diamonds add` now, since registering is sending the cover |
+| 10 days before their 60 run out | days left on your audition | the only deadline left, and it's theirs alone |
+| the day the 60 run out | your audition has closed | not a reminder but an ending, so it sits outside the one-a-day rule |
+| the renewal ladder, 60/30/20 days out | your membership runs to | last, and silent while a re-audition is live |
 
 Listed in priority order, which is also the order the code checks them in. At
 most one goes out per person per run.
@@ -1214,29 +1222,30 @@ enforcement date, and silence is exactly what would take them there. `noticeDue`
 is gated on `enforcedAt` rather than on `withdrawnAt` for the same reason:
 "nothing to renew" is a fact about membership, and withdrawing isn't one.
 
-### Reading it is the gate
+### Round 0's result is one message
 
-**Round 1 opens when the dancer opens their feedback, not when we send it.**
-Delivery is our side of the exchange; the round is a response to something
-having been *named to them*, and a document nobody has opened has named
-nothing. So the DM carries the verdict and a button, the button reveals the
-document, and the first read sets `document.readAt` — which is what
-`activeRound` and `feedbackReady` now key on.
+**Everything a dancer is owed arrives together, and the only button on it is
+the real one.** A pass carries the verdict, the whole written document, and
+**Start time now**; a fail carries the verdict, the document, and the offer to
+dance the rest as practice. `activeRound` and `feedbackReady` key on
+`document.deliveredAt`.
 
-Three consequences, each of which is a decision rather than a side effect:
+It took three goes to get here, and the two discarded versions are worth
+keeping on file because both sounded right:
 
-- **The verdict is in the notice, not behind the button.** Making someone click
-  to learn whether they're through would turn opening their own feedback into an
-  act of courage. The decision is owed immediately; the reasons can wait for a
-  minute they choose.
-- **A director can still assign the Round 1 piece.** That gates on delivery
-  (`feedbackSentOut`), not on the read, because a director's work must not wait
-  on a dancer's inbox and the piece is revealed on start anyway. Only starting
-  the window waits.
-- **One nudge, three days on.** `feedbackUnread` is the only way to get stuck in
-  this process that needs nobody's cooperation, so it gets a single message and
-  then stops. Asking twice would be telling someone how to feel about their own
-  feedback.
+- **Holding the document behind a button**, so that reading it was what opened
+  Round 1 (`document.readAt`). The theory was sound — a document nobody has
+  opened has named nothing, and Round 1 is a response to something named. In
+  practice it made reading your own feedback into a step, and the feedback is
+  the part worth having whichever way the verdict went.
+- **Holding the *round* behind a button** that revealed nothing and started no
+  clock, just navigated. That needed a paragraph explaining it was safe to
+  press, which is the tell: a button whose only job is to prove it does nothing
+  shouldn't exist.
+
+What survived from both: **the pass waits for Round 1's piece to be up**, so
+the start button has something behind it. `/diamonds assign` is what releases a
+held document, and the two arrive as one message.
 
 ### Four things changed after a read-through
 
@@ -1313,8 +1322,9 @@ Three decisions inside it:
   the argument that made withdrawing cost it: there are exactly two ways to not
   finish, and if one of them is free it is the one everybody takes. Quitting is
   a thing you do and running out is a thing that happens to you, which is a real
-  difference — but it is handled by **an extension**, not by a cheaper wait.
-  `/diamonds extend scope:run` moves the date, before or after it passes.
+  difference — but it is handled by **a director putting them back on**, not by
+  a cheaper wait. `/diamonds add` clears `expiredAt` and restarts the clock, so
+  they come back mid-round with days they can use. Nothing extends a run.
 - **Nothing is invented for a record without `registeredAt`.** A deadline
   somebody was never told about is worse than no deadline.
 
@@ -1356,9 +1366,14 @@ true.
 
 Answered: nothing has gone out; **pass/fail**, not ranked; **two directors**;
 Round 0 submissions may be an existing cover **from the last 6 months**;
-extensions are **partial days granted by a director**; the eligibility gate
-**stays** (Majors are open, so there's a path through); Round 0 is
-**registration** for returners.
+extensions are **days a dancer asks for and a director grants**, on a round's
+window only; the eligibility gate **stays** (Majors are open, so there's a path
+through); Round 0 is **registration** for returners, and for newcomers
+registration *is* the Round 0 submission.
+
+And the clock: **60 days** for all three rounds, counted from registration,
+stopping when Round 2 is submitted. Nothing extends it — `/diamonds add` is the
+way back into a closed one.
 
 And on membership: enforcement is **Jan 1 / Jul 1**, the date is the **second one
 after your half closes**; a renewing member does **all three rounds**; the
@@ -1386,29 +1401,33 @@ is in the appendix.
    answer for: a pass records `passed` and sends the news, and the placement —
    the role, the commitment, and whether a non-qualifier can be placed at all —
    is still a conversation between the two of you.
-4. **Write everyone's feedback when you get to them.** Both cohorts, one
-   command. It's the gate on Round 1, so nothing of theirs moves until it's
-   sent, and `/diamonds roster` lists who's owed one as the thing blocking
-   them. A newcomer has to send a cover first; a returning Diamond doesn't.
-5. **A third voice for recusals and deadlocks** — and fix the two stale comments
-   while you're there. (Two directors, above. Affects rank 12 today.)
+4. **Write everyone's feedback, and put the Round 1 piece up.** Either order —
+   whichever you do second sends the pass as one message, with the start button
+   on it. `/diamonds roster` lists who's owed one. Both are blocking: nothing of
+   theirs moves until both are done.
+5. **A third voice for recusals and deadlocks.** Two directors and
+   `minScores: 2` means one recusal stalls a round, and your own practice
+   auditions sit unballoted for ever. The one structural gap left.
 
 **Can wait, but decide them rather than discovering them:**
 
-7. **Is there a practical cap on Diamonds' size?** Pass/fail and a cap collide.
+6. **Is there a practical cap on Diamonds' size?** Pass/fail and a cap collide.
    (§1b)
-8. **Live remote session in Round 2** — optional now that Round 1 covers
-   coachability. If you want one, it lands around JAN 7–10. (§3)
-9. **Round 1's step size** — one anchor (+1.25), or two?
-10. **Are auditionees told their number?** Today they are: the Round 1 panel
-    quotes the before-number when the piece goes up, and the result quotes both
-    ends. That seems right — it is the one number the round turns on, and a
-    delta you can't see the start of is a verdict rather than a measurement —
-    but it is a choice, and reversible.
+7. **Live remote session in Round 2** — optional now that Round 1 covers
+   coachability. (§3)
+8. **Is 60 days the right number?** It covers four waits totalling 16 days, so
+   it's generous by design rather than by accident — but it's the number a
+   dancer feels, and nobody has run it yet.
+9. **Are auditionees told their number?** Today they are: the Round 1 panel
+   quotes the before-number and the target to beat, and the result quotes both
+   ends. That seems right — it is the one number the round turns on, and a delta
+   you can't see the start of is a verdict rather than a measurement — but it is
+   a choice, and reversible.
 
-Treating as settled unless you say otherwise: **tiered feedback** for the
-practice cohort (§2), and **Round 0 as a pass/fail gate** carrying its own
-written feedback either way (§5).
+Settled since: **Round 1's step size** scales with the start (half the distance
+to the bar, floored at one anchor step, capped at the bar); the **practice
+cohort gets the same feedback** as anyone, with no verdict; **enforcement hours**
+are midnight New York.
 
 ## Appendix: what the announcement has to say
 
@@ -1423,8 +1442,13 @@ deadline it printed is now wrong, and it's gone.
   of the process that is genuinely unusual.
 - **The turnaround you're promising** — three to five days after each
   submission. It's a commitment; the bot repeats it on every card.
-- **How you register, get your piece and start your window**, by command, with
-  no director in the loop.
+- **That registering means sending a cover.** One step, not two, and an old
+  video is fine — this is the single most likely thing for somebody to get
+  wrong about the process.
+- **The 60 days**, counted from registering, for all three rounds. And that
+  running out of them costs the same six months as dropping out.
+- **How you get your piece and start your window**, from the panel in your DMs,
+  with no director in the loop.
 
 **The membership rules**, none of which are written down anywhere a dancer can
 read:

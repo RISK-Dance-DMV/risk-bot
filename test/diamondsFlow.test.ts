@@ -105,8 +105,9 @@ import {
   allRecords,
   assignPiece,
   assignToAll,
+  answerAsk,
+  askForDays,
   carryAsPractice,
-  extendRun,
   fileFeedback,
   getRecord,
   grantExtension,
@@ -1012,11 +1013,17 @@ describe("registering again", () => {
     expect(result.ok).toBe(true);
 
     const stored = (await getRecord(env, "100"))!;
-    expect(stored.rounds).toEqual({});
     expect(stored.history).toHaveLength(1);
     expect(stored.cohort).toBe("returning");
     expect(stored.enforcedAt).toBe("2028-01-01T05:00:00.000Z");
     expect(stored.targetFixedAt).toBeUndefined();
+
+    // Clean apart from the new audition's review card, which goes up on
+    // registration — a returning Diamond is reviewable the moment they're on
+    // the list, since their Round 0 is decided on the season already watched.
+    expect(Object.keys(stored.rounds)).toEqual(["0"]);
+    expect(roundOf(stored, 0).submittedAt).toBeUndefined();
+    expect(roundOf(stored, 0).reviewMessageId).toBe("msg1");
   });
 
   /**
@@ -2552,39 +2559,23 @@ describe("saying when you'll start", () => {
     expect((await planStart(env, "100", 1, "the 2nd", TIMELINE, POLICY, now)).ok).toBe(false);
   });
 
-  it("reminds them that morning, once", async () => {
+  /**
+   * **The estimate no longer sends anything.** It used to DM them on the
+   * morning they'd picked; that message is gone, and the date stays for the
+   * roster — a date somebody volunteered isn't a commitment, and chasing them
+   * about one turns a helpful guess into a thing they'd rather not have offered.
+   */
+  it("says nothing on the day they picked", async () => {
     const { env } = envWith(
       Object.fromEntries([seed(assigned({ plannedStartAt: "2026-12-02" }))]),
     );
     expect(
-      await runDiamondsSweep(env, TIMELINE, POLICY, new Date("2026-12-01T09:00:00Z")),
+      await runDiamondsSweep(env, TIMELINE, POLICY, new Date("2026-12-02T09:00:00Z")),
     ).toEqual(quiet);
-
-    const theDay = new Date("2026-12-02T09:00:00Z");
-    expect(await runDiamondsSweep(env, TIMELINE, POLICY, theDay)).toEqual({
-      ...quiet,
-      planned: 1,
-    });
-    const sent = sendDirectMessage.mock.calls[0]![2];
-    expect(sent.content!).toMatch(/you said you'd start/i);
-    expect(sent.content!).toMatch(/No obligation/);
-    // Still must not spoil the reveal it's nudging them towards.
-    expect(sent.content!).not.toContain("https://p");
-
-    expect(await runDiamondsSweep(env, TIMELINE, POLICY, theDay)).toEqual(quiet);
+    expect(sendDirectMessage).not.toHaveBeenCalled();
   });
 
-  /** Due *on* the day: a sweep that missed it stays quiet rather than running late. */
-  it("doesn't say it two days late", async () => {
-    const { env } = envWith(
-      Object.fromEntries([seed(assigned({ plannedStartAt: "2026-12-02" }))]),
-    );
-    expect(
-      await runDiamondsSweep(env, TIMELINE, POLICY, new Date("2026-12-04T09:00:00Z")),
-    ).toEqual(quiet);
-  });
-
-  it("moves the reminder when they move the date", async () => {
+  it("still records it, and still clears the marker when they move it", async () => {
     const { env } = envWith(
       Object.fromEntries([
         seed(
@@ -2597,10 +2588,8 @@ describe("saying when you'll start", () => {
     );
     await planStart(env, "100", 1, "2026-12-09", TIMELINE, POLICY, now);
     const entry = roundOf((await getRecord(env, "100"))!, 1);
+    expect(entry.plannedStartAt).toBe("2026-12-09");
     expect(entry.plannedRemindedAt).toBeUndefined();
-    expect(
-      await runDiamondsSweep(env, TIMELINE, POLICY, new Date("2026-12-09T09:00:00Z")),
-    ).toEqual({ ...quiet, planned: 1 });
   });
 
   it("says nothing once they've started", async () => {
@@ -3411,7 +3400,9 @@ describe("the two-month clock", () => {
     });
     const said = sendDirectMessage.mock.calls[0]![2].content!;
     expect(said).toMatch(/days left on your audition/);
-    expect(said).toMatch(/ask a director/i);
+    // Points at a director before the date, not at an extension that no longer
+    // exists: nothing can add days to a run, so the ask has to come early.
+    expect(said).toMatch(/the date rather than after/);
     expect(await runDiamondsSweep(env, TIMELINE, POLICY, tenOut)).toEqual(quiet);
   });
 
@@ -3526,73 +3517,28 @@ describe("the two-month clock", () => {
     expect(runEndsAt(granted(14, 7), 60)).toBe("2027-02-05T00:00:00.000Z");
   });
 
-  describe("extending the run", () => {
-    it("moves the date and tells them", async () => {
-      const { env } = envWith(Object.fromEntries([seed(running())]));
-      const result = await extendRun(env, "100", 14, "injury", "d1", POLICY, new Date("2027-01-10T00:00:00Z"));
-      expect(result.ok).toBe(true);
-      expect(runEndsAt((await getRecord(env, "100"))!, 60)).toBe("2027-01-29T00:00:00.000Z");
-      expect(sendDirectMessage.mock.calls[0]![2].content!).toMatch(/14 more days/);
-    });
+  /**
+   * `/diamonds add` is the only door back into a closed run, now that nobody
+   * can extend one. It gives them a fresh clock rather than adding days to a
+   * date that has gone — somebody being let back in needs days to use.
+   */
+  it("reopens a closed run through add, with the clock restarted", async () => {
+    const { env } = envWith(
+      Object.fromEntries([seed(running({ expiredAt: "2027-01-16T12:00:00.000Z" }))]),
+    );
+    const back = new Date("2027-02-01T00:00:00Z");
+    const result = await addEntry(env, "100", "new", 1, TIMELINE, POLICY, back);
+    expect(result.ok).toBe(true);
 
-    /**
-     * The reason it exists. The refusal a dancer sees when the clock runs out
-     * says "talk to a director", so a director has to be able to act on that —
-     * and they pick up mid-round rather than starting over.
-     */
-    it("reopens an audition that already closed", async () => {
-      const { env } = envWith(
-        Object.fromEntries([seed(running({ expiredAt: "2027-01-16T12:00:00.000Z" }))]),
-      );
-      const result = await extendRun(env, "100", 21, "was in hospital", "d1", POLICY, new Date("2027-01-18T00:00:00Z"));
-      expect(result.ok).toBe(true);
+    const stored = (await getRecord(env, "100"))!;
+    expect(stored.expiredAt).toBeUndefined();
+    expect(stored.registeredAt).toBe(back.toISOString());
+    expect(runEndsAt(stored, 60)).toBe("2027-04-02T00:00:00.000Z");
+    // And the warning can come round again against the new date.
+    expect(stored.runWarnedAt).toBeUndefined();
 
-      const stored = (await getRecord(env, "100"))!;
-      expect(stored.expiredAt).toBeUndefined();
-      expect(runExpired(stored, 60, new Date("2027-01-19T00:00:00Z"))).toBe(false);
-      expect(sendDirectMessage.mock.calls[0]![2].content!).toMatch(/open again/);
-      // And the wait it was charging is gone with it.
-      expect(
-        (await register(env, "100", "Ada", "new", COVER, TIMELINE, POLICY, new Date("2027-01-19T00:00:00Z"))).ok,
-      ).toBe(true);
-    });
-
-    /** The warning can fire again, so an extension doesn't cost them one. */
-    it("lets the ten-day warning come round again", async () => {
-      const { env } = envWith(
-        Object.fromEntries([seed(running({ runWarnedAt: "2027-01-05T12:00:00.000Z" }))]),
-      );
-      await extendRun(env, "100", 14, "injury", "d1", POLICY, new Date("2027-01-10T00:00:00Z"));
-      expect((await getRecord(env, "100"))!.runWarnedAt).toBeUndefined();
-
-      sendDirectMessage.mockClear();
-      const run = await runDiamondsSweep(env, TIMELINE, POLICY, new Date("2027-01-20T12:00:00Z"));
-      expect(run.warned).toBe(1);
-    });
-
-    it("refuses days that still leave them past the date", async () => {
-      const { env } = envWith(
-        Object.fromEntries([seed(running({ expiredAt: "2027-01-16T12:00:00.000Z" }))]),
-      );
-      const result = await extendRun(env, "100", 1, "injury", "d1", POLICY, new Date("2027-02-01T00:00:00Z"));
-      expect(result.ok).toBe(false);
-      expect(result.ok === false && result.reason).toMatch(/enough to actually finish/);
-    });
-
-    it("refuses an audition that's already been decided", async () => {
-      const { env } = envWith(
-        Object.fromEntries([
-          seed(
-            running({
-              rounds: { 1: { submittedAt: "a", resultSentAt: "b", outcome: "failed" } },
-            }),
-          ),
-        ]),
-      );
-      const result = await extendRun(env, "100", 14, "x", "d1", POLICY, new Date("2027-01-10T00:00:00Z"));
-      expect(result.ok).toBe(false);
-      expect(result.ok === false && result.reason).toMatch(/diamonds add/);
-    });
+    // Mid-round, not restarted: they pick up where the clock caught them.
+    expect(roundOf(stored, 0).submittedAt).toBe(roundOf(running(), 0).submittedAt);
   });
 });
 
@@ -3794,5 +3740,191 @@ describe("whose time the clock is counting", () => {
     );
     await runDiamondsSweep(env, TIMELINE, POLICY, new Date("2026-11-28T12:00:00Z"));
     expect(alertDirectors).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Asking for more time, and being answered.
+ *
+ * The refusals in this process all point at a director, and until this existed
+ * there was no way to reach one from inside it — a director could grant days
+ * but nobody could ask. Mirrors the trainee pattern: the dancer asks, and the
+ * answer is two buttons where the directors already are.
+ */
+describe("asking for more days", () => {
+  const JOINED = "2026-11-16T00:00:00.000Z";
+
+  /** Mid-window, which is when people actually notice they need time. */
+  const mid = (over: Partial<DiamondsRecord> = {}): DiamondsRecord =>
+    dancer({
+      registeredAt: JOINED,
+      document: feedbackSent(),
+      rounds: {
+        0: zeroPassed(),
+        1: { assignedPiece: "https://p", windowOpenedAt: "2026-11-19T00:00:00.000Z" },
+      },
+      ...sealed,
+      ...over,
+    });
+
+  const now = new Date("2026-11-20T12:00:00Z");
+
+  it("posts the question where the directors are", async () => {
+    const { env } = envWith(Object.fromEntries([seed(mid())]));
+    const asked = await askForDays(env, "100", 4, "sprained my ankle", POLICY, now);
+    expect(asked.ok).toBe(true);
+
+    const posted = postToChannelByName.mock.calls.at(-1)!;
+    expect(posted[2]).toBe("audition-review");
+    const card = posted[3] as { content: string; components: unknown };
+    expect(card.content).toMatch(/asking for 4 more days/);
+    expect(card.content).toContain("sprained my ankle");
+    expect(card.content).toMatch(/Round 1 window/);
+    // Two buttons and nothing else: the one thing on the screen with somebody
+    // waiting on an answer.
+    expect(JSON.stringify(card.components)).toContain("dia|ask-grant|100");
+    expect(JSON.stringify(card.components)).toContain("dia|ask-deny|100");
+
+    // And the message id is kept, so the answer can edit the same message.
+    const stored = (await getRecord(env, "100"))!;
+    expect(stored.request?.messageId).toBe("msg1");
+    expect(stored.request?.round).toBe(1);
+  });
+
+  /**
+   * No open window, no ask. This is a refusal rather than a fallback to the 60
+   * days: the 60 are generous enough that running out of them isn't a timing
+   * problem, and somebody who hasn't started has all the time they need.
+   */
+  it("refuses an ask with no window open, and says why", async () => {
+    const { env } = envWith(
+      Object.fromEntries([seed(mid({ rounds: { 0: zeroPassed() } }))]),
+    );
+    const result = await askForDays(env, "100", 7, "exams", POLICY, now);
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.reason).toMatch(/no window open/);
+    // And points at the one door that can still move it, which isn't theirs.
+    expect(result.ok === false && result.reason).toMatch(/a director can move/);
+    expect((await getRecord(env, "100"))!.request).toBeUndefined();
+  });
+
+  it("refuses a second ask while the first is unanswered", async () => {
+    const { env } = envWith(Object.fromEntries([seed(mid())]));
+    await askForDays(env, "100", 4, "ankle", POLICY, now);
+    const again = await askForDays(env, "100", 4, "ankle", POLICY, now);
+    expect(again.ok).toBe(false);
+    expect(again.ok === false && again.reason).toMatch(/already asked/);
+  });
+
+  it("refuses a silly number of days, and an empty reason", async () => {
+    const { env } = envWith(Object.fromEntries([seed(mid())]));
+    expect((await askForDays(env, "100", 0, "x", POLICY, now)).ok).toBe(false);
+    expect((await askForDays(env, "100", 99, "x", POLICY, now)).ok).toBe(false);
+    expect((await askForDays(env, "100", 4, "   ", POLICY, now)).ok).toBe(false);
+  });
+
+  /**
+   * Records nothing when the post fails. A request the directors can't see is
+   * worse than one that didn't go through, because the dancer would be waiting
+   * on a question nobody has.
+   */
+  it("records nothing when it can't reach the channel", async () => {
+    postToChannelByName.mockRejectedValueOnce(new Error("no such channel"));
+    const { env } = envWith(Object.fromEntries([seed(mid())]));
+    const result = await askForDays(env, "100", 4, "ankle", POLICY, now);
+    expect(result.ok).toBe(false);
+    expect((await getRecord(env, "100"))!.request).toBeUndefined();
+  });
+
+  it("grants it, extends the window, and edits the question to the answer", async () => {
+    const { env } = envWith(Object.fromEntries([seed(mid())]));
+    await askForDays(env, "100", 4, "ankle", POLICY, now);
+    const answered = await answerAsk(env, "100", "d1", true, "", POLICY, now);
+    expect(answered.ok).toBe(true);
+
+    const stored = (await getRecord(env, "100"))!;
+    // The grant goes through the same path a director's own extension does.
+    expect(roundOf(stored, 1).extension?.days).toBe(4);
+    expect(roundOf(stored, 1).extension?.by).toBe("d1");
+    expect(stored.request?.granted).toBe(true);
+
+    // The question becomes the outcome, in place, with no buttons left.
+    const edited = editMessage.mock.calls.at(-1)!;
+    expect(edited[2]).toBe("msg1");
+    const card = edited[3] as { content: string; components: unknown[] };
+    expect(card.content).toMatch(/Granted by <@d1>/);
+    expect(card.components).toEqual([]);
+  });
+
+  /**
+   * A granted ask never touches the 60 days — only the window. Moving the run
+   * stays a director's deliberate act through `/diamonds extend scope:run`,
+   * which nobody can request.
+   */
+  it("leaves the 60 days alone when it grants", async () => {
+    const { env } = envWith(Object.fromEntries([seed(mid())]));
+    const before = runEndsAt(mid(), 60);
+    await askForDays(env, "100", 4, "ankle", POLICY, now);
+    await answerAsk(env, "100", "d1", true, "", POLICY, now);
+
+    const stored = (await getRecord(env, "100"))!;
+    expect(stored.runExtensions).toBeUndefined();
+    expect(runEndsAt(stored, 60)).toBe(before);
+  });
+
+  it("needs a reason to deny, and tells them what it was", async () => {
+    const { env } = envWith(Object.fromEntries([seed(mid())]));
+    await askForDays(env, "100", 4, "ankle", POLICY, now);
+
+    const blank = await answerAsk(env, "100", "d1", false, "  ", POLICY, now);
+    expect(blank.ok).toBe(false);
+    expect(blank.ok === false && blank.reason).toMatch(/needs a reason/);
+
+    sendDirectMessage.mockClear();
+    const denied = await answerAsk(env, "100", "d1", false, "You've had two already.", POLICY, now);
+    expect(denied.ok).toBe(true);
+    expect((await getRecord(env, "100"))!.request?.granted).toBe(false);
+    // Nothing moved.
+    expect(roundOf((await getRecord(env, "100"))!, 1).extension).toBeUndefined();
+    expect(sendDirectMessage.mock.calls.at(-1)![2].content!).toContain("You've had two already.");
+  });
+
+  it("refuses an answer to a question nobody asked", async () => {
+    const { env } = envWith(Object.fromEntries([seed(mid())]));
+    const result = await answerAsk(env, "100", "d1", true, "", POLICY, now);
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.reason).toMatch(/no open request/);
+  });
+
+  /** The panel says it, so the ask doesn't vanish into a channel they can't see. */
+  it("shows a pending ask on their own panel, and hides the button", () => {
+    const pending = mid({
+      request: { days: 4, reason: "ankle", at: now.toISOString(), round: 1 },
+    });
+    const panel = roundPanel(pending, 1, CTX, now);
+    expect(panel.content).toMatch(/You asked for 4 more days/);
+    expect(panel.content).toMatch(/still the one that counts/);
+    expect(JSON.stringify(panel.components)).not.toContain("dia|ask|me");
+
+    // And offers it when there's nothing pending.
+    expect(JSON.stringify(roundPanel(mid(), 1, CTX, now).components)).toContain("dia|ask|me");
+  });
+
+  it("shows a denial on their panel rather than only in the DM", () => {
+    const refused = mid({
+      request: {
+        days: 4,
+        reason: "ankle",
+        at: now.toISOString(),
+
+        round: 1,
+        granted: false,
+        by: "d1",
+        note: "You've had two already.",
+      },
+    });
+    const panel = roundPanel(refused, 1, CTX, now);
+    expect(panel.content).toMatch(/was declined/);
+    expect(panel.content).toContain("You've had two already.");
   });
 });

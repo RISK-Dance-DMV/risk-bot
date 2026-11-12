@@ -34,6 +34,7 @@ import {
   parseScore,
   roundOf,
   composeFeedback,
+  MAX_ASK_DAYS,
   roundToScore,
   settleRound,
   tally,
@@ -70,8 +71,8 @@ import {
   assignToAll,
   fileFeedback,
   getRecord,
-  extendRun,
-  grantExtension,
+  answerAsk,
+  askForDays,
   carryAsPractice,
   grantMembership,
   takePractice,
@@ -94,7 +95,6 @@ const DIRECTOR_ONLY = [
   "grant",
   "assign",
   "assign-all",
-  "extend",
   "feedback",
   "score",
   "result",
@@ -500,34 +500,6 @@ async function runSubcommand(
     return { content: lines.join("\n") };
   }
 
-  if (sub === "extend") {
-    const dancer = userOption(interaction, "extend", "dancer");
-    if (!dancer) return { content: "❌ Pick who the extension is for." };
-    const round = parseRound(option(interaction, "extend", "round") || "1");
-    if (round === null) return { content: "❌ Round has to be 0, 1 or 2." };
-    const days = Number.parseInt(option(interaction, "extend", "days"), 10);
-    const reason = option(interaction, "extend", "reason");
-
-    // One command, two clocks. Defaults to the window because that is the one
-    // that runs out first and the one people ask about — but a window extension
-    // inside a run that's nearly up buys them nothing, so the choice is
-    // explicit rather than inferred.
-    if (option(interaction, "extend", "scope") === "run") {
-      const result = await extendRun(env, dancer, days, reason, userId, policy, now);
-      return said(
-        result,
-        `⏳ <@${dancer}> has ${days} more day${days === 1 ? "" : "s"} on their whole ` +
-          `audition` +
-          (result.ok && result.record.runExtensions && result.record.runExtensions.length > 1
-            ? ` — that's ${result.record.runExtensions.length} extensions now.`
-            : `.`),
-      );
-    }
-
-    const result = await grantExtension(env, dancer, round, days, reason, userId, policy);
-    return said(result, `⏳ <@${dancer}> has ${days} more day${days === 1 ? "" : "s"}.`);
-  }
-
   if (sub === "add") {
     const dancer = userOption(interaction, "add", "dancer");
     if (!dancer) return { content: "❌ Pick who to add." };
@@ -642,6 +614,8 @@ export async function handleDiamondsComponent(
     "plan-save",
     "leave",
     "practice",
+    "ask",
+    "ask-save",
   ];
   if (!DANCER_ACTIONS.includes(action)) {
     if (!isDirector(await getDirectorIds(env), userId)) {
@@ -853,6 +827,93 @@ export async function handleDiamondsComponent(
     return json({
       type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
       data: withdrawWarning(policy.retryMonths),
+    });
+  }
+
+  // Asking for days, and the two answers. A modal has to be the immediate
+  // response, so the openers do nothing but open.
+  if (action === "ask") return json(askModal());
+  if (action === "ask-deny") {
+    const dancer = arg;
+    if (!/^\d{15,}$/.test(dancer)) return json(ephemeral("That button has gone stale."));
+    return json(denyModal(dancer));
+  }
+
+  if (action === "ask-save") {
+    ctx.waitUntil(
+      (async () => {
+        let payload: MessagePayload;
+        try {
+          const now = new Date();
+          const { policy } = await context(env);
+          const result = await askForDays(
+            env,
+            userId,
+            Number.parseInt(modalValue(interaction, ASK_DAYS), 10),
+            modalValue(interaction, ASK_REASON),
+            policy,
+            now,
+          );
+          payload = result.ok
+            ? {
+                content:
+                  `⏳ **Asked.** The directors have it, and they'll answer either ` +
+                  `way. **Your deadline is still running** until they do, so keep ` +
+                  `working if you can — a granted extension on a submitted round ` +
+                  `is a much better problem than the other way round.`,
+              }
+            : { content: `❌ ${result.reason}` };
+        } catch (err) {
+          payload = {
+            content: `That didn't go through: ${err instanceof Error ? err.message : String(err)}`,
+          };
+        }
+        await editOriginalResponse(env, interaction.application_id, interaction.token, payload);
+      })(),
+    );
+    return json({ type: InteractionResponseType.DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE });
+  }
+
+  if (action === "ask-grant" || action === "ask-deny-save") {
+    const dancer = arg;
+    if (!/^\d{15,}$/.test(dancer)) return json(ephemeral("That button has gone stale."));
+
+    ctx.waitUntil(
+      (async () => {
+        let payload: MessagePayload;
+        try {
+          const now = new Date();
+          const { policy } = await context(env);
+          const granted = action === "ask-grant";
+          const result = await answerAsk(
+            env,
+            dancer,
+            userId,
+            granted,
+            granted ? "" : modalValue(interaction, ASK_NOTE),
+            policy,
+            now,
+          );
+          payload = result.ok
+            ? {
+                content: granted
+                  ? `✅ Granted — <@${dancer}> has been told their new deadline.`
+                  : `🚫 Denied, and <@${dancer}> has been told why.`,
+              }
+            : { content: `❌ ${result.reason}` };
+        } catch (err) {
+          payload = {
+            content: `That didn't go through: ${err instanceof Error ? err.message : String(err)}`,
+          };
+        }
+        await editOriginalResponse(env, interaction.application_id, interaction.token, payload);
+      })(),
+    );
+    // Ephemeral: the ask message in the channel is edited to the outcome by the
+    // flow, so this is only the receipt for whoever pressed.
+    return json({
+      type: InteractionResponseType.DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE,
+      data: { flags: 64 },
     });
   }
 
@@ -1226,6 +1287,88 @@ const SCORE_PREFIX = "score-";
  */
 const SUBMIT_LINK = "submit-link";
 const PLAN_DATE = "plan-date";
+const ASK_DAYS = "ask-days";
+const ASK_REASON = "ask-reason";
+const ASK_NOTE = "ask-note";
+
+/**
+ * Two boxes: how many days, and what happened.
+ *
+ * The reason is required because a director is answering a person rather than
+ * a form, and because the denial path makes them write one too — asking for
+ * time without saying why would put the whole burden of explanation on the
+ * person saying no.
+ *
+ * No scope question. Which clock is under pressure is derived from the record,
+ * and making somebody diagnose their own problem before they can ask for help
+ * is the wrong question at the wrong moment.
+ */
+function askModal(): unknown {
+  return {
+    type: InteractionResponseType.MODAL,
+    data: {
+      custom_id: diamondsCustomId("ask-save", "me"),
+      title: "Ask for more time",
+      components: [
+        {
+          type: ComponentType.ACTION_ROW,
+          components: [
+            {
+              type: ComponentType.TEXT_INPUT,
+              custom_id: ASK_DAYS,
+              style: TextInputStyle.SHORT,
+              label: `How many days? (1–${MAX_ASK_DAYS})`,
+              placeholder: "Enough to finish properly, not a second window",
+              required: true,
+              max_length: 2,
+            },
+          ],
+        },
+        {
+          type: ComponentType.ACTION_ROW,
+          components: [
+            {
+              type: ComponentType.TEXT_INPUT,
+              custom_id: ASK_REASON,
+              style: TextInputStyle.PARAGRAPH,
+              label: "What's happened?",
+              placeholder: "A sentence is plenty. They're answering a person.",
+              required: true,
+              max_length: 600,
+            },
+          ],
+        },
+      ],
+    },
+  };
+}
+
+/** A denial needs a reason, so the only way to deny is through the box. */
+function denyModal(dancer: string): unknown {
+  return {
+    type: InteractionResponseType.MODAL,
+    data: {
+      custom_id: diamondsCustomId("ask-deny-save", dancer),
+      title: "Deny the extension",
+      components: [
+        {
+          type: ComponentType.ACTION_ROW,
+          components: [
+            {
+              type: ComponentType.TEXT_INPUT,
+              custom_id: ASK_NOTE,
+              style: TextInputStyle.PARAGRAPH,
+              label: "Why? They'll be told what you write",
+              placeholder: "\"No\" with no reason just invites asking again.",
+              required: true,
+              max_length: 600,
+            },
+          ],
+        },
+      ],
+    },
+  };
+}
 
 /**
  * One box, because a submission is one fact.
@@ -1300,11 +1443,10 @@ function withdrawWarning(retryMonths: number): MessagePayload {
       `leaving early would be a way around it — so you wouldn't be able to ` +
       `register again for ${retryMonths} months, and you'd come back ` +
       `owing a Round 0 cover.\n\n` +
-      `If you just need more time, you don't need this: nothing expires while ` +
-      `you haven't started a window, and a director can add days to one that's ` +
-      `open. If something has gone wrong, talk to a director first — they can ` +
-      `put you back on the list inside the wait, and that's much easier than ` +
-      `undoing this.`,
+      `**If you just need more time, you don't need this.** There's an **Ask ` +
+      `for more time** button on your panel while a window is open, and a ` +
+      `director can move the whole thing if it's bigger than that. Either is far ` +
+      `easier than undoing this — talk to one of them first.`,
     components: [
       {
         type: ComponentType.ACTION_ROW,

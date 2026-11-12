@@ -21,6 +21,8 @@ import {
   feedbackWritten,
   roundToScore,
   anyPractice,
+  askableRound,
+  requestPending,
   isPractice,
   roundOf,
   runDaysLeft,
@@ -38,6 +40,7 @@ import {
   type Round,
   type RoundRecord,
   type Scores,
+  type ExtensionAsk,
   type Settled,
   type Split,
   type Tally,
@@ -71,7 +74,13 @@ export type DiamondsAction =
   | "plan-save"
   | "leave"
   /** A dancer taking the practice offer after a Round 0 fail. */
-  | "practice";
+  | "practice"
+  /** Asking for more days, and the two answers to it. */
+  | "ask"
+  | "ask-save"
+  | "ask-grant"
+  | "ask-deny"
+  | "ask-deny-save";
 
 const ACTIONS: DiamondsAction[] = [
   "start",
@@ -92,6 +101,11 @@ const ACTIONS: DiamondsAction[] = [
   "plan-save",
   "leave",
   "practice",
+  "ask",
+  "ask-save",
+  "ask-grant",
+  "ask-deny",
+  "ask-deny-save",
 ];
 const PREFIX = "dia";
 const ARG = /^[0-9a-zA-Z:_-]{1,64}$/;
@@ -307,6 +321,12 @@ const BUTTON = {
     label: "Withdraw",
     custom_id: diamondsCustomId("leave", "me"),
   },
+  ask: {
+    type: ComponentType.BUTTON,
+    style: ButtonStyle.SECONDARY,
+    label: "Ask for more time",
+    custom_id: diamondsCustomId("ask", "me"),
+  },
 } as const;
 
 const row = (...buttons: unknown[]) => [
@@ -361,11 +381,17 @@ function roundZeroPanel(
 
   return {
     content:
-      `${head}\n📼 **Post a cover that shows your strengths.** Your own choice of ` +
-      `piece, and an existing one from the last six months is fine — you don't ` +
-      `have to film something new. It's judged as a yes or a no, not scored: ` +
-      `does this belong in the process. Either way you get the feedback.\n` +
-      `Submit with \`/diamonds submit link:<url>\`.\n\n` +
+      // Only reachable for somebody a director added — registering is sending
+      // the cover, so a dancer can't arrive here under their own steam. Said
+      // plainly, because the likeliest reader is wondering why they're on a
+      // list they never joined.
+      `${head}\n📼 **You're on the list, and we need a cover from you.** A ` +
+      `director put you on rather than you registering, so this may be news.\n\n` +
+      `Your own choice of piece, and an existing one from the last six months is ` +
+      `fine — you don't have to film anything new. It's judged as a yes or a no, ` +
+      `not scored: does this belong in the process. Either way you get written ` +
+      `feedback.\n` +
+      `The button below, or \`/diamonds submit link:<url>\`.\n\n` +
       runLine(record, ctx, now) +
       planLine(entry),
     components: row(BUTTON.cover(true), BUTTON.plan(!!entry.plannedStartAt)),
@@ -403,7 +429,7 @@ function runLine(record: DiamondsRecord, ctx: PanelContext, now: Date): string {
   if (left <= 0) {
     return (
       `\n\n⌛ **Your ${ctx.runDays} days ran out ${day(ends)}.** Talk to a director — ` +
-      `they can add days or put you back on the list.`
+      `they can put you back on the list with a fresh ${ctx.runDays} days.`
     );
   }
   return (
@@ -414,19 +440,44 @@ function runLine(record: DiamondsRecord, ctx: PanelContext, now: Date): string {
   );
 }
 
+/**
+ * Their open ask, said on the panel so it doesn't vanish into a DM.
+ *
+ * The gap between asking and being answered is the only stretch in this process
+ * where a dancer is waiting on a human with a deadline still running, and a
+ * panel that showed the old deadline with no mention of the question would read
+ * as though nobody had got it.
+ */
+function askLine(record: DiamondsRecord): string {
+  const ask = record.request;
+  if (!ask) return "";
+  if (ask.granted === undefined) {
+    return (
+      `\n\n⏳ **You asked for ${ask.days} more day${ask.days === 1 ? "" : "s"}** ` +
+      `${when(ask.at)} — the directors have it and nobody has answered yet. The ` +
+      `deadline above is still the one that counts until they do.`
+    );
+  }
+  if (ask.granted) return "";
+  return (
+    `\n\n🚫 **Your request for more days was declined**, so the deadline above ` +
+    `stands.` + (ask.note ? `\n> ${ask.note.split("\n").join("\n> ")}` : "")
+  );
+}
+
 function planLine(entry: RoundRecord): string {
   if (entry.plannedStartAt) {
     return (
-      `\n\n📌 **You said around ${entry.plannedStartAt}.** I'll remind you that ` +
-      `morning. Move it whenever with \`/diamonds plan date:YYYY-MM-DD\` — it was ` +
-      `only ever an estimate, and nothing happens if it slips.`
+      `\n\n📌 **You said around ${entry.plannedStartAt}.** Move it whenever with ` +
+      `\`/diamonds plan date:YYYY-MM-DD\` — it was only ever an estimate, and ` +
+      `nothing happens if it slips.`
     );
   }
   return (
-    `\n\n📌 **Pick a day you'll start and tell me** — the button below, or ` +
-    `\`/diamonds plan date:YYYY-MM-DD\`. You can change it as often as you like ` +
-    `and nothing is held against it — but you'll get a reminder that morning, and ` +
-    `a day you chose yourself is much easier to hit than no day at all.`
+    `\n\n📌 **Pick a day you'll start and tell us** — the button below, or ` +
+    `\`/diamonds plan date:YYYY-MM-DD\`. Nothing is held against it and nothing ` +
+    `chases you about it; it's so the directors can see when to expect you, and ` +
+    `so you've named a day rather than meaning to name one.`
   );
 }
 
@@ -507,8 +558,14 @@ export function roundPanel(
         `**Your piece:**\n${piece}\n\n` +
         `Submit before your window closes — the button, or ` +
         `\`/diamonds submit link:<url>\`.` +
-        targetLine(record, round, ctx),
-      components: row(BUTTON.submit(true)),
+        targetLine(record, round, ctx) +
+        askLine(record),
+      // Asking sits next to submitting rather than somewhere else, because the
+      // moment someone realises they need more time is the moment they are
+      // looking at this panel wondering whether they can finish.
+      components: requestPending(record)
+        ? row(BUTTON.submit(true))
+        : row(BUTTON.submit(true), BUTTON.ask),
     };
   }
 
@@ -604,6 +661,12 @@ export function statusPanel(
   const waiting = retryBlocked(record, ctx.retryMonths, now);
   if (waiting) lines.push(`Next audition · you can register again from ${day(waiting)}`);
 
+  // Never here. An ask only ever moves an open window, and the panel for the
+  // round whose window it is already carries the button — offering it a second
+  // time from the status page would be offering it from a screen that can't say
+  // which window it means.
+  const offersAsk = false;
+
   return {
     content:
       `${panel.content}\n\n**Where everything stands**\n${lines
@@ -616,9 +679,15 @@ export function statusPanel(
     // Withdrawing lives here rather than on a round panel, because this is the
     // panel about *them* rather than about a round — and because the one button
     // that costs six months should not sit next to the one that submits a video.
+    //
+    // Asking for time sits beside it, and the pairing is deliberate: these are
+    // the two things to do when a deadline is a problem, and one of them is far
+    // better than the other.
     components: [
       ...((panel.components as unknown[]) ?? []),
-      ...(activeRound(record, now).ok ? row(BUTTON.leave) : []),
+      ...(activeRound(record, now).ok
+        ? row(...(offersAsk ? [BUTTON.ask] : []), BUTTON.leave)
+        : []),
     ],
   };
 }
@@ -995,6 +1064,77 @@ export interface ReviewOptions {
  * the reply would. The scores and the verdict go on only once the round is
  * settled, at which point the seal has done its work.
  */
+/**
+ * A dancer's ask for more days, as a thing to answer in #audition-review.
+ *
+ * Its own message rather than a row on the review card, because the review card
+ * is posted when a round is *submitted* — and somebody who needs more time
+ * hasn't submitted, so for most asks there is no card to hang this on. The
+ * trainee version can live on the card because that card exists for the whole
+ * audition; this one has to bring its own.
+ *
+ * Two buttons and no scoring, which is the rule the trainee card states: an
+ * extension request is the only thing on a directors' screen with somebody
+ * waiting on an answer, and leaving anything else pressable next to it invites
+ * answering a question nobody asked.
+ *
+ * Once answered it keeps the words and drops the buttons. The outcome is the
+ * audit trail — "who gave them another week, and why" has to survive the
+ * decision.
+ */
+export function askCard(
+  record: DiamondsRecord,
+  ask: ExtensionAsk,
+  windowDays: number,
+): MessagePayload {
+  const who = record.displayName ?? `<@${record.discordId}>`;
+  const what = `their Round ${ask.round} window (${windowDays} days)`;
+  const quoted = ask.reason
+    .split("\n")
+    .map((line) => `> ${line}`)
+    .join("\n");
+
+  if (ask.granted === undefined) {
+    return {
+      content:
+        `⏳ **${who} is asking for ${ask.days} more day${ask.days === 1 ? "" : "s"}** ` +
+        `on ${what}.\n${quoted}\n\n` +
+        `Their deadline is still running while this sits here, so it's worth ` +
+        `answering today either way. A denial needs a reason — they'll be told ` +
+        `what you write.`,
+      components: [
+        {
+          type: ComponentType.ACTION_ROW,
+          components: [
+            {
+              type: ComponentType.BUTTON,
+              style: ButtonStyle.SUCCESS,
+              label: `Grant ${ask.days} day${ask.days === 1 ? "" : "s"}`,
+              custom_id: diamondsCustomId("ask-grant", record.discordId),
+            },
+            {
+              type: ComponentType.BUTTON,
+              style: ButtonStyle.SECONDARY,
+              label: "Deny",
+              custom_id: diamondsCustomId("ask-deny", record.discordId),
+            },
+          ],
+        },
+      ],
+    };
+  }
+
+  return {
+    content:
+      `${ask.granted ? "✅" : "🚫"} **${who} asked for ${ask.days} more ` +
+      `day${ask.days === 1 ? "" : "s"}** on ${what}.\n${quoted}\n\n` +
+      `${ask.granted ? "Granted" : "Denied"} by <@${ask.by ?? "?"}>` +
+      `${ask.answeredAt ? ` ${when(ask.answeredAt)}` : ""}.` +
+      (ask.note ? `\n> ${ask.note.split("\n").join("\n> ")}` : ""),
+    components: [],
+  };
+}
+
 export function reviewCard(
   record: DiamondsRecord,
   round: Round,

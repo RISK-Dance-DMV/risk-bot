@@ -110,6 +110,43 @@ export interface Extension {
   at: string;
 }
 
+/** The most a dancer may ask for. Beyond this is a conversation, not a form. */
+export const MAX_ASK_DAYS = 21;
+
+/**
+ * A dancer's open ask for more time, and a director's answer to it.
+ *
+ * Separate from `Extension`, which is the grant. This is the *question*, and it
+ * has to exist as its own record because the gap between asking and being
+ * answered is where the dancer is waiting — the panel has to be able to say
+ * "you asked, nobody's answered yet" rather than silently showing the old
+ * deadline.
+ *
+ * **Always a round's window.** A dancer can't ask for days on the 60 — that
+ * number is generous enough that running out of it is not a timing problem, and
+ * an ask against it would be asking to be slower at the whole thing rather than
+ * for help with the three days in front of them. The only thing that moves a
+ * run is `/diamonds add`, which restarts the clock for somebody a director has
+ * decided to let back in; there is no way to request that and no command to
+ * extend one.
+ */
+export interface ExtensionAsk {
+  days: number;
+  reason: string;
+  at: string;
+  /** The round whose window this is about. */
+  round: Round;
+  /** Absent while no director has answered. */
+  granted?: boolean;
+  by?: string;
+  answeredAt?: string;
+  /** Required on a denial: "no" with no reason just invites asking again. */
+  note?: string;
+  /** The message in the review channel that carries the two buttons. */
+  messageId?: string;
+  channelId?: string;
+}
+
 export interface RoundRecord {
   /**
    * The piece they're to learn. Assigned by a director ahead of the round so
@@ -412,6 +449,13 @@ export interface DiamondsRecord {
    * `runEndsAt`.
    */
   runExtensions?: Extension[];
+  /**
+   * Their open ask for more time, or the last one answered.
+   *
+   * One at a time: a second ask while the first is unanswered is refused, which
+   * is what stops a pending question becoming a queue of them.
+   */
+  request?: ExtensionAsk;
   /** Set when the run ran out with the audition unfinished. */
   expiredAt?: string;
   /** So the "your two months are nearly up" warning goes once. */
@@ -491,6 +535,35 @@ export function runDaysLeft(
 ): number | undefined {
   const ends = runEndsAt(record, runDays);
   return ends === undefined ? undefined : daysUntil(ends, now);
+}
+
+/** An ask nobody has answered yet. */
+export function requestPending(record: DiamondsRecord): boolean {
+  return !!record.request && record.request.granted === undefined;
+}
+
+/**
+ * The round whose window an ask would extend, if there is one.
+ *
+ * Derived rather than asked, because the dancer shouldn't have to name which
+ * clock they mean — and because there is only one they can mean. An open window
+ * is the only thing a request can move.
+ *
+ * Nothing when no window is open, which is the common case and a refusal rather
+ * than a fallback: somebody who hasn't started has all the time they need, and
+ * the honest answer to "can I have longer" before you've begun is "start when
+ * you're ready".
+ */
+export function askableRound(
+  record: DiamondsRecord,
+  windowDays: number,
+  now: Date,
+): Round | undefined {
+  const live = activeRound(record, now);
+  if (!live.ok) return undefined;
+  return windowState(roundOf(record, live.round), windowDays, now) === "open"
+    ? live.round
+    : undefined;
 }
 
 /**
