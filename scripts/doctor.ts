@@ -170,6 +170,7 @@ async function main(): Promise<void> {
   }
 
   await checkRoleHierarchy(vars, token, tomlVar("GUILD_DANCE_ID"), fail, warn);
+  await checkDancerAccess(vars, token, tomlVar("GUILD_DANCE_ID"), warn);
 
   console.log("\nNot checkable from here");
   console.log("  · Cloudflare secrets (write-only)");
@@ -204,6 +205,97 @@ function kv(key: string): string {
  * grant just 403s at the moment it matters, which is after a trainee has been
  * told they passed.
  */
+/**
+ * Whether the people who audition can see the channel their commands are
+ * gated to.
+ *
+ * `wrongChannel` in src/diamonds/handlers.ts forces every `/diamonds` into
+ * #diamonds-bot, and five of the fifteen subcommands are theirs — `register`
+ * among them. A dancer who can't see that channel has no way in and gets no
+ * error saying so: there is no channel, so there is nothing to be refused by.
+ * It is the one misconfiguration here that is completely silent on both sides.
+ *
+ * **A warning, never a failure.** Director-only is exactly right while the two
+ * of them are testing privately, and a doctor that cried wolf through the whole
+ * test week would train them to ignore it. What it is for is the handover from
+ * that week to a real audition, which is the moment this gets forgotten.
+ *
+ * Reads the channel's own overwrites and nothing else, deliberately. A category
+ * grant does not reach its channels — Discord computes against the channel, and
+ * one that looks synced in the sidebar may not be — which is exactly how this
+ * ends up wrong while looking right.
+ */
+async function checkDancerAccess(
+  vars: Record<string, string>,
+  token: string,
+  danceGuildId: string,
+  warn: (m: string) => void,
+): Promise<void> {
+  console.log("\ndancer access (dance)");
+  if (!danceGuildId) {
+    warn("no dance guild id — skipping");
+    return;
+  }
+
+  const VIEW = 1n << 10n;
+  const ADMIN = 1n << 3n;
+
+  interface Overwrite { id: string; type: number; allow: string; deny: string }
+  const roles = await discord<
+    { id: string; name: string; permissions: string; managed: boolean }[]
+  >(`/guilds/${danceGuildId}/roles`, token);
+  const channels = await discord<
+    { id: string; name: string; permission_overwrites?: Overwrite[] }[]
+  >(`/guilds/${danceGuildId}/channels`, token);
+  if (!roles || !channels) {
+    warn("couldn't read roles or channels — skipping");
+    return;
+  }
+
+  const wanted = normalizeChannelName(vars.CH_DIAMONDS_BOT ?? "");
+  const channel = channels.find((c) => normalizeChannelName(c.name) === wanted);
+  if (!channel) {
+    warn(`no #${vars.CH_DIAMONDS_BOT} to check — the channel check above says so`);
+    return;
+  }
+
+  const overwrites = channel.permission_overwrites ?? [];
+  const everyone = roles.find((r) => r.id === danceGuildId);
+  const forEveryone = overwrites.find((o) => o.id === danceGuildId && o.type === 0);
+  const openToAll = forEveryone
+    ? (BigInt(forEveryone.allow) & VIEW) !== 0n
+    : (BigInt(everyone?.permissions ?? "0") & VIEW) !== 0n;
+
+  // Two kinds of role prove nothing about a dancer. An admin role sees every
+  // channel whatever the overwrites say, and a managed role belongs to an
+  // integration — the bot's own grant is how it posts here, not a way in for
+  // anybody. Counting either would have this report access that no human has.
+  const ignored = new Set(
+    roles
+      .filter((r) => (BigInt(r.permissions) & ADMIN) !== 0n || r.managed)
+      .map((r) => r.id),
+  );
+  const granted = overwrites
+    .filter((o) => o.type === 0 && !ignored.has(o.id) && o.id !== danceGuildId)
+    .filter((o) => (BigInt(o.allow) & VIEW) !== 0n)
+    .map((o) => roles.find((r) => r.id === o.id)?.name ?? o.id);
+
+  if (openToAll) {
+    ok(`#${channel.name} is open to @everyone — anyone can register`);
+  } else if (granted.length > 0) {
+    ok(`#${channel.name} is open to ${granted.join(", ")}`);
+  } else {
+    warn(
+      `#${channel.name} is admin-only, so nobody can run \`/diamonds register\` ` +
+        `but the two of you — right for a private test, and silent for a dancer. ` +
+        `Before you open it up, allow View Channel for the role the auditionees ` +
+        `hold (the way #${vars.CH_TRAINEE_BOT} re-grants RISK Member at the ` +
+        `channel). Not the Diamonds role alone: that is what passing earns, so ` +
+        `granting only that shuts out every newcomer.`,
+    );
+  }
+}
+
 async function checkRoleHierarchy(
   vars: Record<string, string>,
   token: string,
