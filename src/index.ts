@@ -83,6 +83,7 @@ import {
   handleDiamondsComponent,
 } from "./diamonds/handlers";
 import { runDiamondsDaily } from "./diamonds/flow";
+import { runPieceReview } from "./diamonds/pieceReview";
 import { CARD_COLUMNS } from "./config/columns";
 import { presumedPlacement } from "./config/subunits";
 import { cell } from "./applications/fields";
@@ -827,7 +828,14 @@ export default {
         // Its own endpoint rather than a line in trainee-daily: the Diamonds
         // audition isn't the trainee program, and a Diamonds reminder failing
         // shouldn't be reported as a trainee deadline having gone wrong.
-        return runJobs(env, [["diamonds", () => runDiamondsDaily(env)]]);
+        return runJobs(env, [
+          ["diamonds", () => runDiamondsDaily(env)],
+          // The sweep above is about records — windows closing, clocks running
+          // out. This is the other kind: a date in the year telling the two of
+          // them to change the group piece, which is why it's a job of its own
+          // rather than another counter on the sweep.
+          ["piece review", () => runPieceReview(env)],
+        ]);
       }
 
       case "/jobs/drafts-sweep": {

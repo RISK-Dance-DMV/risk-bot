@@ -1,93 +1,81 @@
 /**
- * Twice a year, asks the directors to look at the two forms before a round of
- * applications arrives on them.
+ * Twice a year, asks the directors to look at the two forms — once to decide
+ * what to change, and once to change it.
  *
  * **Why a reminder rather than a check.** Nothing in here can tell whether a
  * question is still the right question — that's judgement about what you want
  * to ask dancers this half. What a job *can* do is pick the moment, and the
- * moment matters: a form reviewed after applications start arriving has already
- * collected answers in the old shape.
+ * moment matters in a way that is particular to forms: the sheet behind one is
+ * read by column position, so editing a form while it is still open changes the
+ * shape of the rows arriving into it.
  *
- * The one mechanical thing it can carry is the trap. `src/config/columns.ts`
- * maps the sheet's columns to fields, so adding or moving a question breaks
- * intake until that file is updated with it. The existing alert for that fires
- * *after* the break, which is the wrong end of the problem — this says it
- * before anyone touches anything.
+ * Which is why the second stage lands on the day the form closes rather than
+ * the day the decision was made. The bot has no idea when that is — the close
+ * is something you do in Google Forms — so these dates are the only place the
+ * two halves of the year are written down on this side.
  */
 import { isEnabled } from "../config/flags";
-import { alertDirectors } from "../discord/rest";
+import { runYearlyReminders, type YearlyResult, type YearlyStage } from "../config/yearly";
 import type { Env } from "../env";
 
+export interface FormReviewResult extends YearlyResult {
+  skipped?: "flag_off";
+}
+
 /**
- * November 15 and June 15, a month or so ahead of each intake.
+ * The columns trap, in full.
+ *
+ * Carried on the stage that lands when someone is about to edit, because the
+ * existing alert for a shifted sheet fires *after* intake has broken, which is
+ * the wrong end of the problem.
+ */
+const COLUMNS =
+  `⚠️ **If you add, remove or reorder a question, \`src/config/columns.ts\` ` +
+  `needs updating to match.** The sheet is read by column, so a shifted form ` +
+  `means applications stop being read correctly — you'd get told, but only ` +
+  `once something had already come through wrong.`;
+
+/**
+ * Mid-November and mid-May to decide, the first of December and of June to do
+ * it.
  *
  * In code rather than KV because they are not a parameter anybody tunes — they
  * are the shape of the year, like the Jan 1 / Jul 1 enforcement dates. Move
  * them by editing them.
  */
-const REVIEW_DAYS = [
-  { month: 10, day: 15 }, // November
-  { month: 5, day: 15 }, // June
-] as const;
-
-/**
- * How late the reminder may still go out.
- *
- * Fires on the day or within the week after, rather than on the day alone: a
- * cron that missed Saturday because the Worker was down should still say
- * something on Monday. A reminder to look at a form is useful late and useless
- * never — unlike a deadline warning, where arriving late is worse than silence.
- */
-const GRACE_DAYS = 7;
-
-export interface FormReviewResult {
-  skipped?: "flag_off";
-  /** The occurrence it reminded about, if it did: `2026-11`. */
-  reminded?: string;
-}
-
-/** `2026-11` — one marker per occurrence, so each fires once a year. */
-function occurrenceOf(now: Date): string | undefined {
-  for (const { month, day } of REVIEW_DAYS) {
-    const due = Date.UTC(now.getUTCFullYear(), month, day);
-    const since = now.getTime() - due;
-    if (since >= 0 && since < GRACE_DAYS * 24 * 60 * 60 * 1000) {
-      return `${now.getUTCFullYear()}-${String(month + 1).padStart(2, "0")}`;
-    }
-  }
-  return undefined;
-}
-
-export async function runFormReview(
-  env: Env,
-  now = new Date(),
-): Promise<FormReviewResult> {
-  if (!(await isEnabled(env, "applications"))) return { skipped: "flag_off" };
-
-  const occurrence = occurrenceOf(now);
-  if (!occurrence) return {};
-
-  const key = `applications:form-review:${occurrence}`;
-  if (await env.KV.get(key)) return {};
-
-  await alertDirectors(
-    env,
-    `📋 **Worth a look at the two forms before the next round of applications.**\n\n` +
-      `The **application form** and the **audition form** — questions still the ` +
+const STAGES: readonly YearlyStage[] = [
+  {
+    name: "think",
+    days: [
+      { month: 10, day: 15 }, // November
+      { month: 4, day: 15 }, // May
+    ],
+    message:
+      `📋 **About two weeks until the forms close — worth deciding now what ` +
+      `changes.**\n\n` +
+      `The **application form** and the **audition form**. Questions still the ` +
       `ones you want to ask, wording still right, anything to add or drop from ` +
       `last time.\n\n` +
-      `⚠️ **If you add, remove or reorder a question, \`src/config/columns.ts\` ` +
-      `needs updating to match.** The sheet is read by column, so a shifted ` +
-      `form means applications stop being read correctly — you'd get told, but ` +
-      `only once something had already come through wrong.\n\n` +
-      `Nothing to do in the bot. This is the only reminder about it until the ` +
-      `next one.`,
-  );
+      `Nothing to do yet, and better not to: editing a form that's still open ` +
+      `changes it under the rows coming in. There's a second reminder on the ` +
+      `day they close, which is when the editing is safe.`,
+  },
+  {
+    name: "act",
+    days: [
+      { month: 11, day: 1 }, // December
+      { month: 5, day: 1 }, // June
+    ],
+    message:
+      `📋 **The forms close today — this is the window to change them.**\n\n` +
+      `Whatever you settled on a fortnight ago, now's when it goes in: the ` +
+      `**application form** and the **audition form**.\n\n` +
+      `${COLUMNS}\n\n` +
+      `This is the only reminder about it until the next half.`,
+  },
+];
 
-  // Written after the post, so a failed alert is retried tomorrow rather than
-  // marked done. `alertDirectors` swallows its own errors, so this is the
-  // weaker guarantee of the two — but a reminder sent twice is a far smaller
-  // problem than one silently skipped for six months.
-  await env.KV.put(key, now.toISOString());
-  return { reminded: occurrence };
+export async function runFormReview(env: Env, now = new Date()): Promise<FormReviewResult> {
+  if (!(await isEnabled(env, "applications"))) return { skipped: "flag_off" };
+  return runYearlyReminders(env, "applications:form-review", STAGES, now);
 }

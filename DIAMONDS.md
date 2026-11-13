@@ -659,6 +659,44 @@ in one run:
 Listed in priority order, which is also the order the code checks them in. At
 most one goes out per person per run.
 
+### The two dates in the year
+
+The sweep is about records — somebody's window, somebody's clock. Two reminders
+aren't about anybody at all, and they go to #directors-bot-confirmation:
+
+| When | What |
+| --- | --- |
+| 15 December, 15 June | decide the next Round 2 group piece |
+| 1 January, 1 July | put it up — `/diamonds assign-all round:2 piece:<link>` |
+
+The second pair are the membership enforcement dates, on purpose: a group piece
+that turned over on some other pair would give the audition two different ideas
+of which half of the year it was in.
+
+Two stages because the two jobs are different. Deciding wants a fortnight;
+putting it up wants to happen on the first and not before, because `assignToAll`
+is deliberately narrow about who it touches — everyone through Round 1 who
+hasn't started Round 2. On the first of the month that is everyone waiting.
+Halfway through a window it is an arbitrary subset, and the people it skipped
+are a half behind with nothing recording why.
+
+Swapping it costs the people it reaches nothing. Round 2 reveals the piece on
+start, so the link they are holding is one they have never seen. Anyone
+mid-window or already submitted keeps theirs, and `assignedPiece` is stored per
+round per dancer, so a swap cannot lose track of who danced what.
+
+**It doesn't stick.** Nothing stores "the current group piece", so a Round 1
+pass after the swap still needs `/diamonds assign` by hand — which is why the
+reminder says so. The fix is a standing piece in KV, stamped onto Round 2 at the
+Round 1 pass; not built, because it moves who owns the piece and that is a
+decision rather than a refactor.
+
+The same shape runs on the applications side for the two forms
+(`src/applications/formReview.ts`): decide on 15 November and 15 May, edit on 1
+December and 1 June, which is when the forms close and therefore the only window
+where editing one can't change its shape under rows still arriving. Both sit on
+`src/config/yearly.ts`.
+
 ### Where it lives
 
 `src/diamonds/`, its own module. **It mirrors rank 12's clock rather than
@@ -756,8 +794,9 @@ the piece must not land anywhere a second person can read it.
 described above, on its own endpoint rather than a line in trainee-daily. It
 reads the flag itself, so turning Diamonds off stops the DMs too.
 
-90 tests in `test/diamonds.test.ts` and 87 in `test/diamondsFlow.test.ts`. 703
-across the suite.
+137 tests in `test/diamonds.test.ts` and 199 in `test/diamondsFlow.test.ts`,
+plus 8 in `test/pieceReview.test.ts` and 6 in `test/yearly.test.ts`. 878 across
+the suite.
 
 ### Scoring
 
