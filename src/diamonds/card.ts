@@ -210,9 +210,8 @@ export function feedbackArrived(document: string, windowDays: number): MessagePa
       `**Round 0 — your result**\n\n` +
       `Thanks for sending this in. **You're through to Round 1** — nicely done.\n\n` +
       `${document}\n\n` +
-      `**Round 1 is a piece we've picked for you**, chosen to look at one ` +
-      `specific thing. We'll tell you what that thing is when it goes up, and ` +
-      `we'll be looking at the same thing again afterwards.\n` +
+      `**Round 1 is Director's Choice** — a piece we've picked for you, based ` +
+      `on your feedback. It's an opportunity to push yourself.\n` +
       `${startWarning(ROUND_REVEAL[1], windowDays)}\n\n` +
       `Have a proper read of the above first, and press it when you've got ` +
       `${windowDays} days to give it. If anything here needs explaining, ask ` +
@@ -239,7 +238,7 @@ export function feedbackRefused(document: string, windowDays: number): MessagePa
     content:
       `**Round 0 — your result**\n\n` +
       `Thanks for putting this together. We've decided not to take it through ` +
-      `to Round 1 — the reasons are below, and they're worth reading properly.\n\n` +
+      `to Round 1. Our feedback is below.\n\n` +
       `${document}\n\n` +
       `**If you'd like to dance Rounds 1 and 2 as practice, you're very ` +
       `welcome to.** The button below sets it up: the same pieces, the same ` +
@@ -422,15 +421,14 @@ function runLine(record: DiamondsRecord, ctx: PanelContext, now: Date): string {
 
   if (left <= 0) {
     return (
-      `\n\n⌛ **Your ${ctx.runDays} days ran out ${day(ends)}.** Talk to a director — ` +
-      `they can put you back on the list with a fresh ${ctx.runDays} days.`
+      `\n\n⌛ **Your ${ctx.runDays} days ran out ${day(ends)}**, so this audition ` +
+      `is closed.`
     );
   }
   return (
-    `\n\n⏳ **All three rounds by ${day(ends)}** — ${ctx.runDays} days from when you ` +
-    `registered, and **${left}** left. The whole thing takes about ${needed} days ` +
-    `of actual process, so there's room; if you need more, ask a director before ` +
-    `the date rather than after.`
+    `\n\n⏳ **All three rounds by ${day(ends)}** — ${ctx.runDays} days from when ` +
+    `you registered, and **${left}** left. The whole thing takes about ` +
+    `${needed} days of actual process, so there's plenty of room.`
   );
 }
 
@@ -461,23 +459,25 @@ function askLine(record: DiamondsRecord): string {
 
 
 /**
- * The one thing Round 1 is watching, named and not numbered.
+ * What Round 1's panel says about the piece, which is deliberately little.
  *
- * This used to quote both the starting read and the number to beat, on the
- * argument that a delta you can't see the start of is a verdict rather than a
- * measurement. That argument was about the directors' problem, not the
- * dancer's: the number exists so two people reach the same reading, and handing
- * it over turns the round into a figure to chase instead of a thing to fix.
+ * Two versions of this have gone. The first quoted the starting read and the
+ * number to beat, on the argument that a delta you can't see the start of is a
+ * verdict rather than a measurement — true, and about the directors' problem
+ * rather than the dancer's. The second named the one thing the round was
+ * watching, which turned out to be the same mistake in words: it tells somebody
+ * exactly what to polish and nothing about the rest of the piece.
  *
- * So they get the thing, in words. We keep the number.
+ * So the panel says Round 1 is Director's Choice and chosen from their
+ * feedback, and leaves it there. The named thing still exists — it's what the
+ * ballot scores — and the dancer meets it in the written feedback afterwards,
+ * where it comes with a sentence rather than a target.
  */
 function targetLine(record: DiamondsRecord, round: Round): string {
-  if (round !== 1 || !record.target) return "";
+  if (round !== 1) return "";
   return (
-    `\n**What this round is looking at:** ${record.target}.\n` +
-    `We noted where that sat before this piece went up, and we'll look at the ` +
-    `same thing again afterwards. Everything else still counts — that one thing ` +
-    `is what the round turns on.`
+    `\n**This is Director's Choice** — picked for you from your Round 0 ` +
+    `feedback, and a chance to push yourself.`
   );
 }
 
@@ -1424,8 +1424,8 @@ export function resultMessage(
       ? `**${name} — Round 1**\n\n` +
           `Thanks for sending this in. **You're through to Round 2** — well done.` +
           notes +
-          `\n\n**Round 2 is the Director's Choice piece** — one piece, the same ` +
-          `for everyone. It'll arrive here once it's assigned, and you'll have ` +
+          `\n\n**Round 2 is the group piece** — one piece, the same for ` +
+          `everyone. It'll arrive here once it's assigned, and you'll have ` +
           `${ctx.windowDays} days with it from the moment you start.\n\n` +
           `Any questions, just ask.`
       : `**${name} — Round 1**\n\n` +
@@ -1459,8 +1459,8 @@ export function resultMessage(
         `you for the work you put into all three rounds.` +
         notes +
         `${membership}\n\n` +
-        `One of us will be in touch about what happens next. Any questions in ` +
-        `the meantime, just ask.`
+        `Anything else about what happens next will come through here. Any ` +
+        `questions in the meantime, just ask.`
     : `**${name} — Round 2**\n\n` +
         `Thanks for the work you put into all three rounds. We've decided not ` +
         `to take this one through — the reasons are below.` +

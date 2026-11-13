@@ -997,13 +997,15 @@ export async function fileFeedback(
   const delivered = await deliverDocument(env, written, policy, at);
   await putRecord(env, delivered.record);
   await refreshReviewCard(env, delivered.record, 0, policy);
+  if (!delivered.reached) await dmClosed(env, discordId, "their Round 0 result");
   return {
     ok: true,
     record: delivered.record,
     warning: delivered.reached
       ? undefined
-      : `Written, but couldn't DM <@${discordId}> — saved as undelivered, so Round 1 ` +
-        `has **not** opened for them. Fix their DMs and file it again.`,
+      : `Written, but couldn't DM <@${discordId}> — saved as undelivered, so ` +
+        `Round 1 has **not** opened for them. Details in ` +
+        `#${env.CH_DIRECTORS_CONFIRMATION}; file it again once their DMs are open.`,
   };
 }
 
@@ -1312,13 +1314,40 @@ function runOut(
   return {
     ok: false,
     reason:
-      `Your ${policy.runDays} days ran out on <t:${unix}:D>, so this audition is ` +
-      `closed. **Talk to a director** — they can put you back on the list with a ` +
-      `fresh ${policy.runDays} days, picking up where you left off, and they'd ` +
-      `rather do that than lose you to a calendar.`,
+      `Your ${policy.runDays} days ran out on <t:${unix}:D>, so this audition ` +
+      `is closed. You're welcome to audition again once the ` +
+      `${policy.retryMonths}-month wait is up — \`/diamonds status\` has the ` +
+      `date.`,
   };
 }
 
+
+/**
+ * Says so in the directors' channel when a DM bounces, and says what to do.
+ *
+ * A dancer with DMs off is invisible to this whole process *from their own
+ * side*: everything they'd be told arrives by DM, so they see nothing, assume
+ * nothing has happened, and wait. Nobody finds out until a director notices a
+ * result that won't send. The bot can't reach them to say "open your DMs" —
+ * that's the whole problem — so the only place the fact can usefully land is
+ * where the two people who *can* reach them are looking.
+ *
+ * Carries the fix rather than just the failure, because the first question is
+ * always "how do they turn that on" and it isn't obvious.
+ */
+async function dmClosed(env: Env, discordId: string, what: string): Promise<void> {
+  await alertDirectors(
+    env,
+    `⚠️ **Couldn't DM <@${discordId}>** — ${what} hasn't reached them, and ` +
+      `nothing has been recorded as sent.\n` +
+      `Almost always one setting on their side: **User Settings → Privacy & ` +
+      `Safety → Allow direct messages from server members**, which can also be ` +
+      `switched off per-server from the RISK Dance server menu. Ask them to turn ` +
+      `it on, then run it again.\n` +
+      `Until then they can see nothing of their audition, so they won't know ` +
+      `anything is waiting.`,
+  );
+}
 
 /**
  * Whether this person is one of the two who judge Diamonds, and so exempt from
@@ -1466,7 +1495,7 @@ export async function runDiamondsSweep(
             `⏰ **Round ${round} closes <t:${unix}:R>.** Submit with ` +
             `\`/diamonds submit link:<url>\` before then.\n` +
             `If something's gone wrong, there's an **Ask for more time** button ` +
-            `on your panel — better to use it now than after.`,
+            `on your panel.`,
         });
         current = withRound(current, round, { remindedAt: now.toISOString() });
         await putRecord(env, current);
@@ -1734,10 +1763,11 @@ function renewalNotice(
   if (daysLeft > (policy.noticeDays[1] ?? 30)) {
     return {
       content:
-        `**Your Diamonds membership runs to ${date}** — about two months off.\n\n` +
+        `**Your Diamonds membership runs to ${date}** — about two months away.\n\n` +
         `Membership is renewed by re-auditioning, and passing sets a new date. ` +
-        `Going earlier in the half of the year gives you a longer next term, so ` +
-        `there's something in it for going sooner.\n\n` +
+        `**Auditioning in October or April gives you the longest next term** — ` +
+        `about fifteen months — because your date is set by the half of the year ` +
+        `you audition in. Leaving it to March or September gives you about nine.\n\n` +
         `Nothing to do today — just worth knowing the date. Any questions, ask ` +
         `a director.`,
     };
@@ -2092,12 +2122,14 @@ export async function sendResult(
     components: resultComponents(promoted, round, settled),
   });
   if (!reached) {
+    await dmClosed(env, discordId, `their Round ${round} result`);
     return {
       ok: false,
       reason:
-        `Couldn't DM <@${discordId}>, so nothing has been recorded as sent. Fix ` +
-        `their DMs and try again — a result marked sent that never arrived is the ` +
-        `worst of both.`,
+        `Couldn't DM <@${discordId}>, so nothing has been recorded as sent — a ` +
+        `result marked sent that never arrived is the worst of both. I've put ` +
+        `the details in #${env.CH_DIRECTORS_CONFIRMATION}; try again once their ` +
+        `DMs are open.`,
     };
   }
 

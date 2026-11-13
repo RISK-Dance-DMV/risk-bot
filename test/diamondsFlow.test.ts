@@ -1780,7 +1780,7 @@ describe("Round 0 is not a window", () => {
       new Date("2027-03-30T00:00:00Z"),
     );
     expect(panel.content).toMatch(/ran out/);
-    expect(panel.content).toMatch(/Talk to a director/);
+    expect(panel.content).toMatch(/this audition\s+is closed/);
   });
 
   it("promises the review turnaround once they've submitted", () => {
@@ -2273,7 +2273,10 @@ describe("the Round 1 target", () => {
     // The thing, in words. **Never the number** — the panel used to quote both
     // the starting read and the score to beat, and that turned the round into a
     // figure to chase instead of a thing to fix.
-    expect(panel.content).toContain("timing drifts late in the second eight");
+    // The named thing is no longer on the panel at all — it reaches them in
+    // the written feedback, with a sentence round it rather than as a target.
+    expect(panel.content).not.toContain("timing drifts late in the second eight");
+    expect(panel.content).toMatch(/Director's Choice/);
     expect(panel.content).not.toMatch(/\d\/10|\d\.\d/);
   });
 
@@ -3195,7 +3198,10 @@ describe("the two-month clock", () => {
     const started = await startWindow(env, "100", 1, TIMELINE, POLICY, after);
     expect(started.ok).toBe(false);
     expect(started.ok === false && started.reason).toMatch(/ran out/);
-    expect(started.ok === false && started.reason).toMatch(/Talk to a director/);
+    // Names the wait and where to find the date, rather than inviting them to
+    // ask a director to reopen it — that's a decision, not a service.
+    expect(started.ok === false && started.reason).toMatch(/6-month wait is up/);
+    expect(started.ok === false && started.reason).not.toMatch(/put you back on/);
 
     const sent = await submit(env, "100", 0, "https://cover", TIMELINE, POLICY, after);
     expect(sent.ok).toBe(false);
@@ -3792,5 +3798,49 @@ describe("what a dancer's messages never contain", () => {
       },
     });
     expect(statusPanel(done, 2, CTX, now).content!).toContain("Round 2 ·");
+  });
+});
+
+/**
+ * A dancer with DMs off is invisible to the process from their own side.
+ *
+ * Everything they'd be told arrives by DM, so they see nothing and assume
+ * nothing has happened. The bot can't reach them to say "open your DMs", so the
+ * fact has to land where the two people who *can* reach them are looking.
+ */
+describe("when a dancer's DMs are closed", () => {
+  it("tells the directors who, and how they fix it", async () => {
+    const { env } = envWith(
+      Object.fromEntries([
+        seed(
+          dancer({
+            ...sealed,
+            document: feedbackSent(),
+            rounds: {
+              0: zeroPassed(),
+              1: {
+                assignedPiece: "p",
+                submittedAt: "2026-11-20T00:00:00.000Z",
+                feedback: { d1: { text: "Arms much better.", at: "x" } },
+                ballots: { d1: { targetScore: 7, at: "x" }, d2: { targetScore: 7, at: "x" } },
+              },
+            },
+          }),
+        ),
+      ]),
+    );
+    sendDirectMessage.mockResolvedValueOnce(false);
+
+    const sent = await sendResult(env, "100", DIRECTORS, CTX, POLICY, new Date("2026-11-22T00:00:00Z"));
+    expect(sent.ok).toBe(false);
+
+    const alert = alertDirectors.mock.calls.at(-1)![1];
+    expect(alert).toContain("<@100>");
+    expect(alert).toMatch(/Allow direct messages from server members/);
+    // The consequence, so nobody assumes the dancer is just slow.
+    expect(alert).toMatch(/they can see nothing of their audition/);
+
+    // And nothing is recorded as sent.
+    expect(roundOf((await getRecord(env, "100"))!, 1).resultSentAt).toBeUndefined();
   });
 });

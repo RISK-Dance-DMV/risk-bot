@@ -1,5 +1,6 @@
 import { runAuditionReconcile, handleAuditionSubmit } from "./applications/auditions";
 import { runBackstop } from "./applications/backstop";
+import { runFormReview } from "./applications/formReview";
 import {
   isDirectorAction,
   parseCustomId,
@@ -846,6 +847,10 @@ export default {
           ["auditions", () => runAuditionReconcile(env)],
           ["stale", () => runStaleSweep(env)],
           ["waitlist", () => runWaitlistRevisit(env)],
+          // Last, and unrelated to the rest: the others are about rows that
+          // arrived, this one is a date in the year telling the directors to
+          // look at the forms those rows come from.
+          ["form review", () => runFormReview(env)],
         ]);
       }
 
