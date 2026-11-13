@@ -8,11 +8,17 @@ of the ways this goes wrong are ordering mistakes rather than bugs.
 
 **Test before you run `/diamonds grant`, not after.**
 
-The sweep walks every record under `dia:rec:` every morning at 13:40 UTC
-(08:40 ET) — the cron in `.github/workflows/diamonds-daily.yml` is already
-live and is doing nothing only because the flag is off. While your own test
-record is the only record, the sweep has nothing else it could act on. Once
-the existing Diamonds are on the list, it does.
+The sweep walks every record under `dia:rec:` and acts on each one. While
+your own test record is the only record, it has nothing else it could
+touch. Once the existing Diamonds are on the list, it does.
+
+**Right now the sweep cannot run at all**, which buys you the whole test
+week for free: `.github/workflows/diamonds-daily.yml` exists only on this
+machine. GitHub runs scheduled workflows from the default branch, and the
+file has never been pushed, so there is no Diamonds cron on GitHub —
+`trainee-daily.yml` is missing up there too. Nothing autonomous happens
+until you push. The ordering above is still the right ordering, because
+pushing is what starts the clock, and it is one command.
 
 It is not as sharp as it sounds: `grantMembership` refuses a date in the
 past, so a granted member can't lapse the next morning. What it *can* do
@@ -154,12 +160,15 @@ Each of these needs a fresh record, so see Phase 5 for the reset.
 
 ## Phase 4 — the sweep
 
-Don't wait for 08:40 ET. Fire it from the GitHub Actions tab →
-`diamonds-daily` → **Run workflow**, or:
+**This needs the workflow pushed first** — see the rule at the top. Once it
+is on `main`, don't wait for 08:40 ET: GitHub → Actions → `diamonds-daily`
+→ **Run workflow**. The `workflow_dispatch` trigger is there for exactly
+this. (`gh` isn't installed on this machine, so the Actions tab is the way.)
 
-```bash
-gh workflow run diamonds-daily.yml
-```
+It needs no new secrets. It reads `WORKER_URL` and `INBOUND_SECRET`, the
+same two `applications-daily` already uses — so if that one is green in the
+Actions tab, this one will run too. Worth a glance at its last run before
+you rely on that.
 
 What it should do: remind you the day before a window shuts, nudge you as
 the last start date approaches, warn then close the 60-day run, and post a
@@ -210,7 +219,14 @@ npx wrangler kv key put --binding=KV --preview false "config:diamonds_min_scores
    re-audition by. Leave `until` blank to derive it from today.
 5. **`/diamonds config`** once more, read against the announcement you
    wrote.
-6. Calibrate with Huy against the reference deck, so the first real ballots
+6. **Push, so the cron exists.** `git pull --rebase` first — `origin/main`
+   has a keepalive commit this checkout doesn't, so a plain push is
+   rejected. This is also what puts `trainee-daily.yml` up there, and it is
+   the step that makes everything above start happening on its own.
+7. **`npm run deploy`**, if the Worker hasn't been deployed since these
+   commits. The cron calls the Worker; pushing the workflow doesn't update
+   the code it calls.
+8. Calibrate with Huy against the reference deck, so the first real ballots
    mean the same thing from both of you.
 
 The flag is already on from Phase 1. If you turned it off at any point:
