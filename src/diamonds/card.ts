@@ -208,14 +208,15 @@ export function feedbackArrived(document: string, windowDays: number): MessagePa
   return {
     content:
       `**Round 0 — your result**\n\n` +
-      `Thank you for your submission. **You're through to Round 1.**\n\n` +
+      `Thanks for sending this in. **You're through to Round 1** — nicely done.\n\n` +
       `${document}\n\n` +
       `**Round 1 is a piece we've picked for you**, chosen to look at one ` +
       `specific thing. We'll tell you what that thing is when it goes up, and ` +
-      `we'll look at the same thing again afterwards.\n` +
+      `we'll be looking at the same thing again afterwards.\n` +
       `${startWarning(ROUND_REVEAL[1], windowDays)}\n\n` +
-      `Read the above properly first, and press it when you've got ` +
-      `${windowDays} days to give it. Questions to a director.`,
+      `Have a proper read of the above first, and press it when you've got ` +
+      `${windowDays} days to give it. If anything here needs explaining, ask ` +
+      `either of us — we'd rather talk it through than have you guess.`,
     components: row(BUTTON.start(1)),
   };
 }
@@ -237,14 +238,16 @@ export function feedbackRefused(document: string, windowDays: number): MessagePa
   return {
     content:
       `**Round 0 — your result**\n\n` +
-      `Thank you for your submission. We've decided not to take this one ` +
-      `through to Round 1.\n\n` +
+      `Thanks for putting this together. We've decided not to take it through ` +
+      `to Round 1 — the reasons are below, and they're worth reading properly.\n\n` +
       `${document}\n\n` +
-      `**If you'd like to dance Rounds 1 and 2 as practice**, the button below ` +
-      `sets that up: the same pieces, the same ${windowDays}-day windows, the ` +
-      `same written feedback, and no verdict at the end. It costs nothing and ` +
-      `doesn't change this result.\n\n` +
-      `Questions to a director.`,
+      `**If you'd like to dance Rounds 1 and 2 as practice, you're very ` +
+      `welcome to.** The button below sets it up: the same pieces, the same ` +
+      `${windowDays}-day windows, the same written feedback from both of us, and ` +
+      `no verdict at the end. It costs you nothing and it doesn't change this ` +
+      `result.\n\n` +
+      `Any questions about the feedback, just ask — either of us is glad to go ` +
+      `through it with you.`,
     components: [
       {
         type: ComponentType.ACTION_ROW,
@@ -564,8 +567,8 @@ export function roundPanel(
       // start button — the first was on their Round 0 result, which explained
       // the whole mechanic — so repeating the explanation reads as though we'd
       // forgotten. For Round 2 it's the first, and the warning carries it.
-      `${head}\n**Your piece is ready.** Start it whenever you like; there's no ` +
-      `deadline on starting, and nobody needs to be here for it.\n\n` +
+      `${head}\n**Your piece is ready.** Start it whenever you like — there's no ` +
+      `deadline on starting, and nobody needs to be around for it.\n\n` +
       `${startWarning(ROUND_REVEAL[round], ctx.windowDays)}` +
       targetLine(record, round) +
       runLine(record, ctx, now),
@@ -1404,36 +1407,39 @@ export function resultMessage(
   if (settled.outcome === "practice") {
     return (
       `**${name} — Round ${round}, practice**\n\n` +
-      `Thank you for your submission. This round was practice, so there's no ` +
-      `pass or fail attached to it and nothing is recorded against you.` +
+      `Thanks for dancing it. This round was practice, so there's no pass or ` +
+      `fail attached and nothing is recorded against you — here's what we saw.` +
       notes +
       (round === 2
-        ? `\n\nThat's the end of the run. You're welcome to audition for real ` +
-          `whenever you like.\n\nQuestions to a director.`
-        : `\n\nYour next piece will arrive here the same way.\n\nQuestions to a ` +
-          `director.`)
+        ? `\n\nThat's the end of the run, and we're glad you did it. You're ` +
+          `welcome to audition for real whenever you like.\n\n` +
+          `Any questions, just ask.`
+        : `\n\nYour next piece will arrive here the same way.\n\nAny questions, ` +
+          `just ask.`)
     );
   }
 
   if (round === 1) {
     return settled.outcome === "advanced"
       ? `**${name} — Round 1**\n\n` +
-          `Thank you for your submission. You're through to Round 2.` +
+          `Thanks for sending this in. **You're through to Round 2** — well done.` +
           notes +
           `\n\n**Round 2 is the Director's Choice piece** — one piece, the same ` +
-          `for everyone. It'll arrive here when it's assigned, and you'll have ` +
-          `${ctx.windowDays} days with it once you start.\n\n` +
-          `Questions to a director.`
+          `for everyone. It'll arrive here once it's assigned, and you'll have ` +
+          `${ctx.windowDays} days with it from the moment you start.\n\n` +
+          `Any questions, just ask.`
       : `**${name} — Round 1**\n\n` +
-          `Thank you for your submission. We've decided not to take this one ` +
-          `through to Round 2.` +
+          `Thanks for the work you put into this. We've decided not to take it ` +
+          `through to Round 2 — the reasons are below.` +
           notes +
-          `\n\nYou're welcome to audition again from ${again}.\n\n` +
-          `**If you'd like to dance Round 2 as practice**, the button below sets ` +
-          `that up: the same piece as everyone, the same ${ctx.windowDays} days, ` +
-          `the same written feedback, and no verdict at the end of it. It costs ` +
-          `nothing and doesn't change this result.\n\n` +
-          `Questions to a director.`;
+          `\n\nYou're welcome to audition again from ${again}, and we'd be glad ` +
+          `to see you back.\n\n` +
+          `**If you'd like to dance Round 2 as practice, you're very welcome ` +
+          `to.** The button below sets it up: the same piece as everyone, the ` +
+          `same ${ctx.windowDays} days, the same written feedback, and no verdict ` +
+          `at the end of it. It costs you nothing and doesn't change this result.\n\n` +
+          `Any questions about the feedback, just ask — either of us is glad to ` +
+          `go through it with you.`;
   }
 
 
@@ -1449,16 +1455,20 @@ export function resultMessage(
 
   return settled.outcome === "passed"
     ? `**${name} — Round 2**\n\n` +
-        `Thank you for your submission. **You've passed — welcome to Diamonds.**` +
+        `**You've passed — welcome to Diamonds.** Congratulations, and thank ` +
+        `you for the work you put into all three rounds.` +
         notes +
         `${membership}\n\n` +
-        `A director will be in touch about what happens next.`
+        `One of us will be in touch about what happens next. Any questions in ` +
+        `the meantime, just ask.`
     : `**${name} — Round 2**\n\n` +
-        `Thank you for your submission. We've decided not to take this one ` +
-        `through.` +
+        `Thanks for the work you put into all three rounds. We've decided not ` +
+        `to take this one through — the reasons are below.` +
         notes +
-        `\n\nYou're welcome to audition again from ${again}.\n\n` +
-        `Questions to a director.`;
+        `\n\nYou're welcome to audition again from ${again}, and we'd be glad to ` +
+        `see you back.\n\n` +
+        `Any questions about the feedback, just ask — either of us is glad to go ` +
+        `through it with you.`;
 }
 
 /**

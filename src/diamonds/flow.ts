@@ -913,7 +913,7 @@ export async function grantExtension(
   const unix = Math.floor(new Date(closes).getTime() / 1000);
   const reached = await sendDirectMessage(env, discordId, {
     content:
-      `⏳ **Extension granted** — Round ${round} now closes <t:${unix}:D> ` +
+      `⏳ **That's granted** — Round ${round} now closes <t:${unix}:D> ` +
       `(<t:${unix}:R>). ${days} extra day${days === 1 ? "" : "s"}.`,
   });
   return {
@@ -1285,10 +1285,9 @@ export async function answerAsk(
   if (!granted) {
     await sendDirectMessage(env, discordId, {
       content:
-        `🚫 **We can't give you the extra time on this one** — your deadline ` +
+        `**We can't give you the extra time on this one**, so your deadline ` +
         `stands as it was.\n> ${note.trim().split("\n").join("\n> ")}\n\n` +
-        `If that lands badly or something has changed, say so to a director ` +
-        `rather than letting the date pass.`,
+        `Sorry to say no. If any of that needs explaining, ask a director.`,
     });
   }
 
@@ -1465,8 +1464,9 @@ export async function runDiamondsSweep(
         await sendDirectMessage(env, current.discordId, {
           content:
             `⏰ **Round ${round} closes <t:${unix}:R>.** Submit with ` +
-            `\`/diamonds submit link:<url>\` before then. If something's gone ` +
-            `wrong, you can request an extension from your panel.`,
+            `\`/diamonds submit link:<url>\` before then.\n` +
+            `If something's gone wrong, there's an **Ask for more time** button ` +
+            `on your panel — better to use it now than after.`,
         });
         current = withRound(current, round, { remindedAt: now.toISOString() });
         await putRecord(env, current);
@@ -1492,11 +1492,12 @@ export async function runDiamondsSweep(
       await sendDirectMessage(env, current.discordId, {
         content:
           `**Round 0 — we don't have your cover yet.**\n\n` +
-          `A director added you to the Diamonds list rather than you registering, ` +
-          `so this may be the first you've heard of it. Round 0 is a video of ` +
-          `your own choosing, and an existing one from the last six months is ` +
-          `fine.\n\n` +
-          `Submit with \`/diamonds submit link:<url>\`. Questions to a director.`,
+          `A director put you on the Diamonds list rather than you registering ` +
+          `yourself, so this may well be the first you've heard of it. Round 0 ` +
+          `is a video of your own choosing, and an existing one from the last six ` +
+          `months is absolutely fine — nothing to film.\n\n` +
+          `Send it over with \`/diamonds submit link:<url>\` whenever suits. If ` +
+          `you're not sure what this is, ask a director and they'll fill you in.`,
       });
       current = withRound(current, 0, { startNudgedAt: now.toISOString() });
       await putRecord(env, current);
@@ -1531,10 +1532,11 @@ export async function runDiamondsSweep(
             `**${left} days left on your audition.**\n\n` +
             `All three rounds need to be finished by <t:${ends}:D> — the ` +
             `${policy.runDays} days run from when you registered. A round takes ` +
-            `${policy.windowDays} days and we return feedback within ` +
-            `${policy.reviewMinDays}–${policy.reviewMaxDays}, so there is still ` +
-            `room.\n\n` +
-            `Questions to a director.`,
+            `${policy.windowDays} days and we turn feedback round within ` +
+            `${policy.reviewMinDays}–${policy.reviewMaxDays}, so there's still ` +
+            `room to do this comfortably.\n\n` +
+            `If you're not sure where you are, \`/diamonds status\` will tell ` +
+            `you, and a director can help if something's unclear.`,
         });
         current = { ...current, runWarnedAt: now.toISOString() };
         await putRecord(env, current);
@@ -1551,15 +1553,16 @@ export async function runDiamondsSweep(
       const told = await sendDirectMessage(env, current.discordId, {
         content:
           `**Your audition has closed.**\n\n` +
-          `The ${policy.runDays} days for all three rounds are up, so this ` +
-          `audition is finished without a result.\n\n` +
+          `The ${policy.runDays} days for all three rounds are up, so this one ` +
+          `finishes without a result. Thanks for the part of it you did.\n\n` +
           `**You can audition again from <t:${Math.floor(
             new Date(
               retryBlockedUntil({ ...current, expiredAt: now.toISOString() }, policy.retryMonths) ??
                 now.toISOString(),
             ).getTime() / 1000,
           )}:D>.** Registering then starts a new audition from Round 0.\n\n` +
-          `Questions to a director.`,
+          `If something got in the way of this one, do say so to a director — ` +
+          `it's useful for us to know.`,
       });
       await alertDirectors(
         env,
@@ -1606,12 +1609,12 @@ export async function runDiamondsSweep(
         const told = await sendDirectMessage(env, current.discordId, {
           content:
             `**Your Diamonds membership has ended.**\n\n` +
-            `It ran to <t:${ranTo}:D>. Membership is renewed by re-auditioning, ` +
-            `so the role has come off.\n\n` +
-            `**You can re-audition whenever you like** — register and you go ` +
-            `through the three rounds like anyone else, and passing puts you ` +
-            `back on with a new date.\n\n` +
-            `Questions to a director.`,
+            `It ran to <t:${ranTo}:D>, and membership is renewed by ` +
+            `re-auditioning — so the role has come off for now.\n\n` +
+            `**You can re-audition whenever you like.** Register and you go ` +
+            `through the three rounds like anyone else; passing puts you back on ` +
+            `with a new date. We'd be glad to see you go again.\n\n` +
+            `Any questions, just ask a director.`,
         });
 
         await alertDirectors(
@@ -1720,9 +1723,9 @@ function renewalNotice(
         `**Your Diamonds membership runs to ${date}.**\n\n` +
         `You can't re-audition before <t:${until}:D> — that's the ` +
         `${policy.retryMonths}-month wait after an audition that didn't go ` +
-        `through, and it runs past your renewal date. On current rules the role ` +
-        `comes off on ${date}.\n\n` +
-        `Questions to a director.`,
+        `through, and it runs past your renewal date. So as things stand the ` +
+        `role comes off on ${date}.\n\n` +
+        `Worth a word with a director if you'd like to talk it through.`,
     };
   }
   const needed = policy.reviewMaxDays + policy.windowDays + policy.reviewMaxDays + policy.windowDays;
@@ -1731,11 +1734,12 @@ function renewalNotice(
   if (daysLeft > (policy.noticeDays[1] ?? 30)) {
     return {
       content:
-        `**Your Diamonds membership runs to ${date}.**\n\n` +
+        `**Your Diamonds membership runs to ${date}** — about two months off.\n\n` +
         `Membership is renewed by re-auditioning, and passing sets a new date. ` +
-        `Re-auditioning earlier in the half of the year gives you a longer next ` +
-        `term, so there's an advantage to going sooner.\n\n` +
-        `Nothing to do today. Questions to a director.`,
+        `Going earlier in the half of the year gives you a longer next term, so ` +
+        `there's something in it for going sooner.\n\n` +
+        `Nothing to do today — just worth knowing the date. Any questions, ask ` +
+        `a director.`,
     };
   }
 
@@ -1745,9 +1749,10 @@ function renewalNotice(
         `**A month to ${date}**, when your Diamonds membership is up for ` +
         `renewal.\n\n` +
         `A re-audition takes about ${needed} days end to end — three rounds, ` +
-        `two windows and our turnaround — so this is the point to start ` +
-        `thinking about which week. \`/diamonds status\` has where you stand.\n\n` +
-        `Questions to a director.`,
+        `two windows and our turnaround — so this is a good point to start ` +
+        `thinking about which week suits. \`/diamonds status\` has where you ` +
+        `stand.\n\n` +
+        `Any questions, ask a director.`,
     };
   }
 
@@ -1755,9 +1760,10 @@ function renewalNotice(
     content:
       `**${daysLeft} days to ${date}.**\n\n` +
       `That's about as long as a re-audition takes, so renewing this term means ` +
-      `starting now. If you haven't re-auditioned by ${date}, the Diamonds role ` +
-      `comes off and you're welcome to audition again whenever you like.\n\n` +
-      `Questions to a director.`,
+      `starting about now. If you haven't re-auditioned by ${date} the Diamonds ` +
+      `role comes off, and you'd be welcome to audition again whenever you ` +
+      `like.\n\n` +
+      `Any questions, ask a director.`,
   };
 }
 

@@ -708,7 +708,7 @@ export function feedbackReady(record: DiamondsRecord, round: Round): Check {
     ok: false,
     reason:
       "Your Round 0 feedback hasn't gone out yet, and Round 1 is a response to " +
-      "it. It'll arrive with your piece.",
+      "it — so it'll arrive together with your piece. Nothing to do yet.",
   };
 }
 
@@ -815,7 +815,9 @@ export function pieceReady(entry: RoundRecord): Check {
   if (!entry.assignedPiece) {
     return {
       ok: false,
-      reason: "Your piece isn't up yet. It'll arrive here when it is.",
+      reason:
+        "Your piece isn't up yet — it'll arrive here as soon as it is, and " +
+        "there's nothing you need to do in the meantime.",
     };
   }
   return { ok: true };

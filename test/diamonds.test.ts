@@ -113,7 +113,7 @@ describe("what someone can do without a director present", () => {
   it("refuses to hand over a piece that isn't assigned, and says it's not their fault", () => {
     const check = pieceReady({});
     expect(check.ok).toBe(false);
-    if (!check.ok) expect(check.reason).toContain("It'll arrive here when it is");
+    if (!check.ok) expect(check.reason).toContain("it'll arrive here as soon as it is");
   });
 
   it("lets them start once a piece is up", () => {
@@ -712,7 +712,7 @@ describe("Round 1 waits on the feedback", () => {
     expect(check.ok).toBe(false);
     if (!check.ok) {
       expect(check.reason).toMatch(/hasn.t gone out yet/);
-      expect(check.reason).toMatch(/It.ll arrive with your piece/);
+      expect(check.reason).toMatch(/arrive together with your piece/);
     }
   });
 

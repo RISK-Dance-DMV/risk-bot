@@ -1640,7 +1640,7 @@ describe("a failed renewal, start to finish", () => {
     expect(run.renewals).toBe(1);
     const sent = String(sendDirectMessage.mock.calls[0]?.[2]?.content);
     expect(sent).toMatch(/can't re-audition before/);
-    expect(sent).toMatch(/Questions to a director/);
+    expect(sent).toMatch(/a director/i);
     // Never tells them to do the thing they are barred from doing, and never
     // suggests the date is negotiable.
     // "renewal date" is fine; being told to renew is not.
@@ -2088,9 +2088,9 @@ describe("the daily sweep", () => {
     const said = sendDirectMessage.mock.calls[0]![2].content!;
     expect(said).toMatch(/don't have your cover yet/);
     // Says why they didn't register themselves, because that's the confusing part.
-    expect(said).toMatch(/A director added you/);
+    expect(said).toMatch(/A director put you on/);
     // And ends the way every dancer-facing message does now.
-    expect(said).toMatch(/Questions to a director/);
+    expect(said).toMatch(/a director/i);
     expect(await runDiamondsSweep(env, TIMELINE, POLICY, due)).toEqual(quiet);
   });
 
@@ -2575,7 +2575,7 @@ describe("feedback, for either cohort", () => {
     );
     await fileFeedback(env, "100", doc, "d1", TIMELINE, POLICY, OPEN);
     const sent = sendDirectMessage.mock.calls[0]![2];
-    expect(sent.content!).toMatch(/not to take this one through/);
+    expect(sent.content!).toMatch(/not to take it through/);
 
     // Everything at once, unlike a pass. A pass holds the document because
     // opening it starts Round 1; a fail opens nothing, so a button in front of
@@ -3163,7 +3163,7 @@ describe("the two-month clock", () => {
     expect(said).toMatch(/days left on your audition/);
     // Points at a director before the date, not at an extension that no longer
     // exists: nothing can add days to a run, so the ask has to come early.
-    expect(said).toMatch(/Questions to a director/);
+    expect(said).toMatch(/a director/i);
     // And no longer suggests the deadline can be moved for them.
     expect(said).not.toMatch(/put you back on|ask a director/i);
     expect(await runDiamondsSweep(env, TIMELINE, POLICY, tenOut)).toEqual(quiet);
@@ -3712,7 +3712,7 @@ describe("what a dancer's messages never contain", () => {
   it("says the Round 0 verdict exactly once, on a pass and on a fail", async () => {
     for (const [verdict, phrase] of [
       ["pass", /through to Round 1/g],
-      ["fail", /not to take this one through/g],
+      ["fail", /not to take it through/g],
     ] as const) {
       const { env } = envWith(
         Object.fromEntries([

@@ -719,9 +719,10 @@ export async function handleDiamondsComponent(
           payload = result.ok
             ? {
                 content:
-                  `You're off the list, and the wait has started. A director can ` +
-                  `put you back on inside it if your case warrants it — ask them ` +
-                  `rather than waiting it out in silence.`,
+                  `You're off the list, and the wait has started. Thanks for ` +
+                  `telling us rather than going quiet — and do talk to a ` +
+                  `director if something's happened, rather than sitting with ` +
+                  `it.`,
                 components: [],
               }
             : { content: `❌ ${result.reason}`, components: [] };
@@ -1373,9 +1374,9 @@ function withdrawWarning(retryMonths: number): MessagePayload {
       `register again for ${retryMonths} months, and you'd come back ` +
       `owing a Round 0 cover.\n\n` +
       `**If you just need more time, you don't need this.** There's an **Ask ` +
-      `for more time** button on your panel while a window is open, and a ` +
-      `director can move the whole thing if it's bigger than that. Either is far ` +
-      `easier than undoing this — talk to one of them first.`,
+      `for more time** button on your panel while a window is open, and if it's ` +
+      `something bigger than that, have a word with a director first. Either is ` +
+      `far easier than undoing this.`,
     components: [
       {
         type: ComponentType.ACTION_ROW,
